@@ -18,6 +18,8 @@ from acquisition.margin_dual_b import MarginDualBStrategy
 from acquisition.ours import OursGapStrategy, OursGradDispStrategy, OursHessianStrategy, OursStrategy
 from acquisition.random_sampling import RandomStrategy
 
+# Temporary comment for remote push verification.
+
 
 METHOD_REGISTRY = {
     "random": RandomStrategy,
