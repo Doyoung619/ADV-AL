@@ -1,0 +1,33 @@
+아래 작업을 그대로 실행해줘.
+
+1) 작업 디렉터리:
+- C:\Users\user\Desktop\ADV-AL
+
+2) 목표:
+- SAAL 액티브 러닝 실험을 기존 Experiment1과 동일 설정으로 실행
+- 변형(Variant): pure, dual_b_p10, dual_b_p30, dual_b_p50, dual_b_p70, dual_b_p90
+- 시드: 0~9
+- 결과 저장 위치: output_Experiment1\saal
+
+3) 고정 실험 설정:
+- dataset: cifar10
+- model: small_cnn
+- initial labeled size: 500
+- acquisition size per round: 200
+- rounds: 10
+- epochs per round: 50
+- epsilon: 1/255
+- epsilon_acq: 1/255
+- acquisition pool subset size: 5000
+- metrics: clean / fgsm / pgd (logit mismatch eval skip)
+- device: cuda
+- num-workers: 0
+- SAAL: rho=0.05, norm=linf
+
+4) 실행:
+- 아래 명령을 실행:
+  powershell -ExecutionPolicy Bypass -File .\run_saal_experiment1.ps1
+
+5) 실행 정책:
+- 이미 완료된 run(round_metrics.json 11개)은 자동 skip
+- 실패 run이 있으면 해당 run-name과 에러 로그를 출력
