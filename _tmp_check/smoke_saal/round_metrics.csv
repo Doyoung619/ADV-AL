@@ -1,3 +1,0 @@
-acquisition_pool_scored_size,acquisition_scoring_time_sec,avg_logit_mismatch,clean_acc,eval_time_sec,fgsm_acc,labeled_size,mean_grad_disp_score,method,pgd10_acc,pgd_acc,pool_size,round,round_time_sec,selected_mean_grad_disp_score,selection_time_sec,train_time_sec
-49950,0.0,nan,10.26,30.749048500088975,7.88,50,nan,saal,7.88,7.88,49950,0,31.071160100167617,nan,0.0,0.30821359995752573
-512,3.221589900087565,nan,10.0,29.74124180013314,10.0,70,nan,saal,10.0,10.0,49930,1,33.06751470011659,nan,0.005101699847728014,0.08266830001957715
