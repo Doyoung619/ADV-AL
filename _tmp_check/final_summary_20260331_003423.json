@@ -1,0 +1,15 @@
+[
+  {
+    "method": "saal",
+    "run_dir": "C:\\Users\\user\\Desktop\\ADV-AL\\_tmp_check\\smoke_saal",
+    "total_time_sec": 66.72793079982512,
+    "final_round": 1,
+    "final_labeled_size": 70,
+    "final_clean_acc": 10.0,
+    "final_fgsm_acc": 10.0,
+    "final_pgd_acc": 10.0,
+    "final_avg_logit_mismatch": NaN,
+    "best_clean_acc": 10.26,
+    "best_pgd_acc": 10.0
+  }
+]

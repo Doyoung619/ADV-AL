@@ -1,0 +1,2 @@
+best_clean_acc,best_pgd_acc,final_avg_logit_mismatch,final_clean_acc,final_fgsm_acc,final_labeled_size,final_pgd_acc,final_round,method,run_dir,total_time_sec
+10.26,10.0,nan,10.0,10.0,70,10.0,1,saal,C:\Users\user\Desktop\ADV-AL\_tmp_check\smoke_saal,66.72793079982512

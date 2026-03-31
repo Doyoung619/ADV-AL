@@ -1,0 +1,14 @@
+﻿# Data / experiment outputs
+data/
+output_Experiment1/
+output_Experiment2/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# OS/editor
+.DS_Store
+Thumbs.db

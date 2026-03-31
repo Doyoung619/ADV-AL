@@ -1,0 +1,15 @@
+[
+  {
+    "method": "saal_dual_b",
+    "run_dir": "C:\\Users\\user\\Desktop\\ADV-AL\\_tmp_check\\smoke_saal_dual_b",
+    "total_time_sec": 82.42026409995742,
+    "final_round": 1,
+    "final_labeled_size": 70,
+    "final_clean_acc": 10.44,
+    "final_fgsm_acc": 3.55,
+    "final_pgd_acc": 3.44,
+    "final_avg_logit_mismatch": NaN,
+    "best_clean_acc": 10.44,
+    "best_pgd_acc": 7.88
+  }
+]

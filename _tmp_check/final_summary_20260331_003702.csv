@@ -1,0 +1,2 @@
+best_clean_acc,best_pgd_acc,final_avg_logit_mismatch,final_clean_acc,final_fgsm_acc,final_labeled_size,final_pgd_acc,final_round,method,run_dir,total_time_sec
+10.44,7.88,nan,10.44,3.55,70,3.44,1,saal_dual_b,C:\Users\user\Desktop\ADV-AL\_tmp_check\smoke_saal_dual_b,82.42026409995742

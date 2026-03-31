@@ -1,0 +1,22 @@
+2026-03-31 00:33:16 | INFO | Starting method=saal seed=7 device=cpu run_dir=C:\Users\user\Desktop\ADV-AL\_tmp_check\smoke_saal | GPU: n/a
+2026-03-31 00:33:17 | INFO | Data loaded in 1.10s (train_total=50000 al_train=50000 val_fixed=0 test=10000) | GPU: n/a
+2026-03-31 00:33:17 | INFO | [Round 0] labeled=50 train=50 val_fixed=0 | GPU: n/a
+2026-03-31 00:33:17 | INFO | [Round 0] epoch=1/1 loss=2.3244 acc=10.00 val_acc=nan data_t=0.1867s batch_t=0.1034s epoch_t=00:00.29 lr=0.000010 | GPU: n/a
+2026-03-31 00:33:17 | INFO | [Round 0] Epoch 1/1 time=00:00.29 avg=00:00.29 ETA=00:00.00 | GPU: n/a
+2026-03-31 00:33:17 | INFO | [Round 0] training complete in 00:00.30 (best monitor=10.000) | GPU: n/a
+2026-03-31 00:33:17 | INFO | [Round 0] evaluation started | GPU: n/a
+2026-03-31 00:33:48 | INFO | [Round 0] clean=10.26 fgsm=7.88 pgd=7.88 grad_disp_mean=nan grad_disp_sel=nan round_t=31.07s | GPU: n/a
+2026-03-31 00:33:48 | INFO | [Round 1/2] elapsed=00:31.07 avg_round=00:31.07 projected_remaining=00:31.07 | GPU: n/a
+2026-03-31 00:33:49 | INFO | [Round 1] acquisition on pool_size=49950 scored_pool=512 budget=20 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [SAAL] scoring progress 2/2 elapsed=00:03.22 avg/batch=1.610s ETA=00:00.00 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [SAAL] stats min=3.018095 max=4832.119141 mean=827.641968 std=769.386719 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [SAAL] config rho=0.050000 norm=linf use_kmeanspp=False batchwise_perturb=False | GPU: n/a
+2026-03-31 00:33:52 | INFO | [SAAL] timing scoring=3.222s selection=0.005s total=3.229s pool=512 picked=20 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [Round 1] labeled=70 train=70 val_fixed=0 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [Round 1] epoch=1/1 loss=2.3707 acc=8.57 val_acc=nan data_t=0.0156s batch_t=0.0569s epoch_t=00:00.07 lr=0.000010 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [Round 1] Epoch 1/1 time=00:00.07 avg=00:00.07 ETA=00:00.00 | GPU: n/a
+2026-03-31 00:33:52 | INFO | [Round 1] training complete in 00:00.08 (best monitor=8.571) | GPU: n/a
+2026-03-31 00:33:52 | INFO | [Round 1] evaluation started | GPU: n/a
+2026-03-31 00:34:22 | INFO | [Round 1] clean=10.00 fgsm=10.00 pgd=10.00 grad_disp_mean=nan grad_disp_sel=nan round_t=33.07s | GPU: n/a
+2026-03-31 00:34:22 | INFO | [Round 2/2] elapsed=00:33.07 avg_round=00:32.07 projected_remaining=00:00.00 | GPU: n/a
+2026-03-31 00:34:22 | INFO | Method saal finished in 66.73s | GPU: n/a

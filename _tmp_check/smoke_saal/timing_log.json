@@ -1,0 +1,79 @@
+[
+  {
+    "event": "data_loading",
+    "duration_sec": 1.0954446999821812,
+    "round": null,
+    "num_train_total": 50000,
+    "num_train_al": 50000,
+    "num_val_fixed": 0
+  },
+  {
+    "event": "loader_build_train_eval",
+    "duration_sec": 0.0001534000039100647,
+    "round": 0
+  },
+  {
+    "event": "training_round",
+    "duration_sec": 0.30821359995752573,
+    "round": 0,
+    "epochs": 1
+  },
+  {
+    "event": "evaluation",
+    "duration_sec": 30.749048500088975,
+    "round": 0
+  },
+  {
+    "event": "round_total",
+    "duration_sec": 31.071160100167617,
+    "round": 0
+  },
+  {
+    "event": "loader_build_acquisition",
+    "duration_sec": 6.200000643730164e-05,
+    "round": 1,
+    "pool_size_total": 49950,
+    "pool_size_scored": 512
+  },
+  {
+    "event": "acquisition_scoring",
+    "duration_sec": 3.221589900087565,
+    "round": 1,
+    "method": "saal",
+    "scored_pool_size": 512,
+    "remaining_pool_size": 49930
+  },
+  {
+    "event": "selection_step",
+    "duration_sec": 0.005101699847728014,
+    "round": 1,
+    "method": "saal",
+    "picked": 20
+  },
+  {
+    "event": "loader_build_train_eval",
+    "duration_sec": 9.17001161724329e-05,
+    "round": 1
+  },
+  {
+    "event": "training_round",
+    "duration_sec": 0.08266830001957715,
+    "round": 1,
+    "epochs": 1
+  },
+  {
+    "event": "evaluation",
+    "duration_sec": 29.74124180013314,
+    "round": 1
+  },
+  {
+    "event": "round_total",
+    "duration_sec": 33.06751470011659,
+    "round": 1
+  },
+  {
+    "event": "experiment_total",
+    "duration_sec": 66.72793079982512,
+    "round": null
+  }
+]

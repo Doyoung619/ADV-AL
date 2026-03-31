@@ -1,0 +1,24 @@
+[
+  {
+    "round": 0,
+    "epoch": 1,
+    "lr": 1e-05,
+    "train_loss": 2.3244338035583496,
+    "train_acc": 10.000000149011612,
+    "val_acc": -1.0,
+    "epoch_time_sec": 0.29045359999872744,
+    "avg_data_time_sec": 0.18665599985979497,
+    "avg_batch_time_sec": 0.10340000013820827
+  },
+  {
+    "round": 1,
+    "epoch": 1,
+    "lr": 1e-05,
+    "train_loss": 2.37074613571167,
+    "train_acc": 8.571428805589676,
+    "val_acc": -1.0,
+    "epoch_time_sec": 0.07271119998767972,
+    "avg_data_time_sec": 0.015632500173524022,
+    "avg_batch_time_sec": 0.05687999981455505
+  }
+]
