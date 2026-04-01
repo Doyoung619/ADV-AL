@@ -134,6 +134,12 @@ def build_command(
         cmd.append("--download-if-missing")
     if global_args["acquisition_pool_subset_size"] is not None:
         cmd.extend(["--acquisition-pool-subset-size", str(global_args["acquisition_pool_subset_size"])])
+    if global_args["compact_artifacts"]:
+        # Cloud-friendly: avoid heavy checkpoint files.
+        cmd.append("--no-save-checkpoints")
+    if global_args["skip_logit_mismatch_eval"]:
+        # Not needed for requested set-level metrics (clean/robust summaries).
+        cmd.append("--skip-logit-mismatch-eval")
     for k, v in sorted(extra.items()):
         cmd.extend([f"--{k.replace('_', '-')}", str(v)])
     return " ".join(cmd) + f" > {log_path} 2>&1"
@@ -165,6 +171,12 @@ def main():
     parser.set_defaults(pin_memory=True)
     parser.add_argument("--download-if-missing", action="store_true")
     parser.add_argument("--acquisition-pool-subset-size", type=int, default=None)
+    parser.add_argument("--compact-artifacts", action="store_true")
+    parser.add_argument("--no-compact-artifacts", dest="compact_artifacts", action="store_false")
+    parser.set_defaults(compact_artifacts=True)
+    parser.add_argument("--skip-logit-mismatch-eval", action="store_true")
+    parser.add_argument("--no-skip-logit-mismatch-eval", dest="skip_logit_mismatch_eval", action="store_false")
+    parser.set_defaults(skip_logit_mismatch_eval=True)
     args = parser.parse_args()
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -185,6 +197,8 @@ def main():
         "pin_memory": bool(args.pin_memory),
         "download_if_missing": bool(args.download_if_missing),
         "acquisition_pool_subset_size": args.acquisition_pool_subset_size,
+        "compact_artifacts": bool(args.compact_artifacts),
+        "skip_logit_mismatch_eval": bool(args.skip_logit_mismatch_eval),
     }
 
     for set_name in set_names:
