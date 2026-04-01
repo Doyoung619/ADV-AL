@@ -46,7 +46,7 @@ def get_mc_predictive_probs(
                 images = images.to(device, non_blocking=True)
                 logits = model(images)
                 probs = F.softmax(logits, dim=1)
-                pass_probs.append(probs.cpu())
+                pass_probs.append(probs.detach())
 
                 if progress_logger is not None:
                     done = mc_idx * total_batches + batch_idx
@@ -70,7 +70,7 @@ def compute_conditional_entropies(
     probs_nkc: torch.Tensor,
     eps: float = 1e-12,
 ) -> torch.Tensor:
-    probs = probs_nkc.to(dtype=torch.float64, device=torch.device("cpu"))
+    probs = probs_nkc.to(dtype=torch.float32, device=probs_nkc.device)
     per_draw_entropy = _entropy_from_probs(probs, eps=eps, dim=2)  # [N, K]
     return per_draw_entropy.mean(dim=1)  # [N]
 
@@ -79,7 +79,7 @@ def compute_bald_scores_from_mc_probs(
     probs_nkc: torch.Tensor,
     eps: float = 1e-12,
 ) -> torch.Tensor:
-    probs = probs_nkc.to(dtype=torch.float64, device=torch.device("cpu"))
+    probs = probs_nkc.to(dtype=torch.float32, device=probs_nkc.device)
     predictive = probs.mean(dim=1)  # [N, C]
     predictive_entropy = _entropy_from_probs(predictive, eps=eps, dim=1)
     conditional_entropy = compute_conditional_entropies(probs, eps=eps)
@@ -100,6 +100,25 @@ def compute_joint_entropy_exact(
     p_joint = joint.mean(dim=1).reshape(-1)  # [M*C]
     p_joint = torch.clamp(p_joint, min=eps)
     return float((-(p_joint * torch.log(p_joint))).sum().item())
+
+
+def compute_joint_entropy_exact_batch(
+    joint_prob_cache: torch.Tensor,
+    candidate_probs_rkc: torch.Tensor,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    Vectorized exact entropy for multiple candidates.
+    joint_prob_cache: [M, K]
+    candidate_probs_rkc: [R, K, C]
+    returns: [R]
+    """
+    # [M, R, K, C]
+    joint = joint_prob_cache[:, None, :, None] * candidate_probs_rkc[None, :, :, :]
+    p_joint = joint.mean(dim=2)  # [M, R, C]
+    p_joint = torch.clamp(p_joint, min=eps)
+    ent = -(p_joint * torch.log(p_joint)).sum(dim=(0, 2))  # [R]
+    return ent
 
 
 def compute_joint_entropy_sampled(
@@ -125,6 +144,32 @@ def compute_joint_entropy_sampled(
     return float((h_a_est + h_x_given_a).item())
 
 
+def compute_joint_entropy_sampled_batch(
+    sampled_log_prob_cache: torch.Tensor,
+    candidate_probs_rkc: torch.Tensor,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    Vectorized sampled entropy for multiple candidates.
+    sampled_log_prob_cache: [S, K]
+    candidate_probs_rkc: [R, K, C]
+    returns: [R]
+    """
+    k = candidate_probs_rkc.size(1)
+    log_k = math.log(float(k))
+    log_q = sampled_log_prob_cache  # [S, K]
+    log_px = torch.log(torch.clamp(candidate_probs_rkc, min=eps))  # [R, K, C]
+
+    log_den = torch.logsumexp(log_q, dim=1, keepdim=True) - log_k  # [S, 1]
+    # [S, R, K, C] -> reduce K => [S, R, C]
+    log_num = torch.logsumexp(log_q[:, None, :, None] + log_px[None, :, :, :], dim=2) - log_k
+    cond = torch.exp(log_num - log_den[:, None, :])  # [S, R, C]
+    h_x_given_a = _entropy_from_probs(cond, eps=eps, dim=2).mean(dim=0)  # [R]
+
+    h_a_est = -log_den.mean()  # scalar
+    return h_a_est + h_x_given_a
+
+
 def update_joint_probability_cache(
     joint_prob_cache: torch.Tensor,
     selected_probs_kc: torch.Tensor,
@@ -144,11 +189,12 @@ def _sample_log_cache_from_exact(
     seed: int,
     eps: float = 1e-12,
 ) -> torch.Tensor:
+    device = joint_prob_cache.device
     p_assign = joint_prob_cache.mean(dim=1)
     p_assign = torch.clamp(p_assign, min=eps)
     p_assign = p_assign / p_assign.sum()
 
-    generator = torch.Generator(device=torch.device("cpu"))
+    generator = torch.Generator(device=device)
     generator.manual_seed(seed)
     sampled_idx = torch.multinomial(
         p_assign,
@@ -179,7 +225,7 @@ def _sample_conditional_labels(
     cond = torch.clamp(cond, min=eps)
     cond = cond / cond.sum(dim=1, keepdim=True)
 
-    generator = torch.Generator(device=torch.device("cpu"))
+    generator = torch.Generator(device=selected_probs_kc.device)
     generator.manual_seed(seed)
     return torch.multinomial(cond, num_samples=1, replacement=True, generator=generator).squeeze(1)  # [S]
 
@@ -200,11 +246,12 @@ def batchbald_greedy_select(
     batch_size: int,
     num_joint_entropy_samples: int = 10000,
     exact_joint_entropy_steps: int = 4,
+    candidate_chunk_size: int = 512,
     eps: float = 1e-12,
     seed: int = 0,
     progress_logger=None,
 ) -> Tuple[np.ndarray, dict]:
-    probs = probs_nkc.to(dtype=torch.float64, device=torch.device("cpu"))
+    probs = probs_nkc.to(dtype=torch.float32, device=probs_nkc.device)
     n, k, c = probs.shape
     if n == 0 or batch_size <= 0:
         return np.array([], dtype=np.int64), {"greedy_scores": []}
@@ -218,7 +265,7 @@ def batchbald_greedy_select(
     conditional_sum_selected = 0.0
 
     # Exact cache starts from empty set A = {}.
-    joint_prob_cache = torch.ones((1, k), dtype=torch.float64, device=torch.device("cpu"))
+    joint_prob_cache = torch.ones((1, k), dtype=probs.dtype, device=probs.device)
     sampled_log_prob_cache = None
 
     # Separate seeds for cache-sampling and label-sampling updates.
@@ -240,22 +287,31 @@ def batchbald_greedy_select(
         best_score = -float("inf")
 
         remaining = np.where(available)[0]
-        for idx in remaining:
-            p_x = probs[int(idx)]  # [K, C]
+        for start in range(0, int(remaining.size), int(candidate_chunk_size)):
+            rem_chunk = remaining[start : start + int(candidate_chunk_size)]
+            cand = probs[torch.as_tensor(rem_chunk, device=probs.device, dtype=torch.long)]  # [R,K,C]
             if sampled_log_prob_cache is None:
-                joint_entropy = compute_joint_entropy_exact(joint_prob_cache=joint_prob_cache, candidate_probs_kc=p_x, eps=eps)
-            else:
-                joint_entropy = compute_joint_entropy_sampled(
-                    sampled_log_prob_cache=sampled_log_prob_cache,
-                    candidate_probs_kc=p_x,
+                joint_ent = compute_joint_entropy_exact_batch(
+                    joint_prob_cache=joint_prob_cache,
+                    candidate_probs_rkc=cand,
                     eps=eps,
-                )
+                )  # [R]
+            else:
+                joint_ent = compute_joint_entropy_sampled_batch(
+                    sampled_log_prob_cache=sampled_log_prob_cache,
+                    candidate_probs_rkc=cand,
+                    eps=eps,
+                )  # [R]
 
-            cond_joint = conditional_sum_selected + float(conditional_entropies[int(idx)].item())
-            score = joint_entropy - cond_joint
-            if score > best_score:
-                best_score = score
-                best_idx = int(idx)
+            cond_chunk = conditional_sum_selected + conditional_entropies[
+                torch.as_tensor(rem_chunk, device=conditional_entropies.device, dtype=torch.long)
+            ]
+            score_chunk = joint_ent - cond_chunk
+            chunk_best_local = int(torch.argmax(score_chunk).item())
+            chunk_best_score = float(score_chunk[chunk_best_local].item())
+            if chunk_best_score > best_score:
+                best_score = chunk_best_score
+                best_idx = int(rem_chunk[chunk_best_local])
 
         if best_idx is None:
             break
@@ -285,7 +341,10 @@ def batchbald_greedy_select(
 
         if progress_logger is not None and ((step + 1) % 10 == 0 or (step + 1) == budget):
             mode = "exact" if sampled_log_prob_cache is None else "sampled"
-            progress_logger.log(f"[BatchBALD] step={step + 1}/{budget} score={best_score:.6f} mode={mode}")
+            progress_logger.log(
+                f"[BatchBALD] step={step + 1}/{budget} score={best_score:.6f} mode={mode}",
+                device=str(probs.device),
+            )
 
     debug = {
         "greedy_scores": greedy_scores,
@@ -325,6 +384,7 @@ class BatchBALDStrategy(BaseAcquisition):
             batch_size=budget,
             num_joint_entropy_samples=self.cfg.batchbald_num_joint_entropy_samples,
             exact_joint_entropy_steps=self.cfg.batchbald_exact_joint_entropy_steps,
+            candidate_chunk_size=512,
             eps=1e-12,
             seed=self.cfg.seed,
             progress_logger=progress_logger,

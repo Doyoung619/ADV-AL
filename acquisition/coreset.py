@@ -34,7 +34,7 @@ def extract_penultimate_features(
             images = images.to(device, non_blocking=True)
             logits, features = model(images, return_features=True)
             _ = logits
-            feats.append(features.cpu())
+            feats.append(features.detach())
             indices.append(batch_indices.clone())
 
             if progress_logger is not None and (batch_idx % 10 == 0 or batch_idx == total_batches):
@@ -89,17 +89,17 @@ def kcenter_greedy(
     if unlabeled_features.ndim != 2:
         raise ValueError(f"unlabeled_features must be rank-2 [N,D], got shape={tuple(unlabeled_features.shape)}")
 
-    points = unlabeled_features.to(dtype=torch.float32, device=torch.device("cpu"))
+    points = unlabeled_features.to(dtype=torch.float32, device=unlabeled_features.device)
     n = points.size(0)
     if n == 0 or budget <= 0:
         return np.array([], dtype=np.int64), {"cover_radius_history": []}
 
     k = min(int(budget), int(n))
     selected = []
-    available = torch.ones(n, dtype=torch.bool, device=torch.device("cpu"))
+    available = torch.ones(n, dtype=torch.bool, device=points.device)
 
     if labeled_features is not None and labeled_features.numel() > 0:
-        centers0 = labeled_features.to(dtype=torch.float32, device=torch.device("cpu"))
+        centers0 = labeled_features.to(dtype=torch.float32, device=points.device)
         min_dist = _min_l2_distance_to_centers(points=points, centers=centers0, chunk_size=chunk_size)
     else:
         # Robust fallback when S0 is empty: start from farthest-from-mean point.
