@@ -24,7 +24,7 @@
   "initial_labeled_size": 500,
   "acquisition_size": 200,
   "rounds": 10,
-  "epochs_per_round": 50,
+  "epochs_per_round": 80,
   "eval_epsilon": 0.00392156862745098,
   "seeds": [
     0,

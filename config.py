@@ -38,7 +38,7 @@ class Config:
     train_batch_size: int = 128
     eval_batch_size: int = 256
     pool_batch_size: int = 256
-    acquisition_pool_subset_size: Optional[int] = None
+    acquisition_pool_subset_size: Optional[int] = 5000
     epochs_per_round: int = 50
     optimizer: str = "adamw"
     lr: float = 1e-3
@@ -203,8 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--acq_candidate_size",
         dest="acquisition_pool_subset_size",
         type=_parse_optional_int,
-        default=None,
-        help="If set, score only a random subset of unlabeled pool per round (None=full pool).",
+        default=5000,
+        help="Score a random subset of unlabeled pool per round (default=5000, use None for full pool).",
     )
     parser.add_argument("--epochs-per-round", "--epochs_per_round", dest="epochs_per_round", type=int, default=50)
     parser.add_argument("--optimizer", type=str, choices=["sgd", "adamw"], default="adamw")

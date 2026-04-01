@@ -49,7 +49,7 @@ EXPERIMENT_SET_DEFINITIONS: Dict[str, Dict] = {
             initial_labeled_size=500,
             acquisition_size=200,
             rounds=10,
-            epochs_per_round=50,
+            epochs_per_round=80,
             eval_epsilon=1.0 / 255.0,
             seeds=DEFAULT_SEEDS_10,
         ),
