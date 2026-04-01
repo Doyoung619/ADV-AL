@@ -9,7 +9,8 @@
   "methods": [
     "random",
     "badge",
-    "bait",
+    "saal",
+    "coreset",
     "batchbald",
     "ours_entropy_p10",
     "ours_bald_p10"

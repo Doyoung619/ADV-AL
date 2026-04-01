@@ -21,6 +21,8 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
     m = method_slug(method_name)
     if m in {"random", "saal", "coreset", "kcenter", "core_set", "badge", "bait", "batchbald"}:
         return m, {}
+    if m == "ours_l2":
+        return "ours", {}
 
     if m in {"entropy_p10_random", "entropy_p10_entropy", "bald_p10_random", "bald_p10_bald"}:
         acq = {

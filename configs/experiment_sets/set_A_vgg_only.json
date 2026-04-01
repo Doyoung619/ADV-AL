@@ -12,12 +12,9 @@
     "saal",
     "coreset",
     "badge",
-    "bait",
     "batchbald",
     "ours_entropy_p10",
-    "ours_bald_p10",
-    "ours_saal_p10",
-    "ours_badge_p10"
+    "ours_bald_p10"
   ],
   "initial_labeled_size": 500,
   "acquisition_size": 200,
