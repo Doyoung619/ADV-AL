@@ -6,6 +6,8 @@ from acquisition.badge_adv_lagrangian import BADGEAdvLagrangianStrategy
 from acquisition.badge_adv_mult import BADGEAdvMultStrategy
 from acquisition.bald_adv_lagrangian import BALDAdvLagrangianStrategy
 from acquisition.bald import BALDStrategy
+from acquisition.batchbald import BatchBALDStrategy
+from acquisition.coreset import CoreSetStrategy
 from acquisition.bald_dual_a import BALDDualAStrategy
 from acquisition.bald_dual_b import BALDDualBStrategy
 from acquisition.entropy import EntropyStrategy
@@ -37,6 +39,10 @@ METHOD_REGISTRY = {
     "badge_adv_lagrangian": BADGEAdvLagrangianStrategy,
     "bait": BAITStrategy,
     "bald": BALDStrategy,
+    "batchbald": BatchBALDStrategy,
+    "coreset": CoreSetStrategy,
+    "kcenter": CoreSetStrategy,
+    "core_set": CoreSetStrategy,
     "bald_dual_a": BALDDualAStrategy,
     "bald_dual_b": BALDDualBStrategy,
     "bald_adv_lagrangian": BALDAdvLagrangianStrategy,

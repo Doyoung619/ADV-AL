@@ -254,6 +254,8 @@ class ActiveLearningRunner:
         subset_size = self.cfg.acquisition_pool_subset_size
         if subset_size is None and self.method_name in {"saal", "saal_dual_b"}:
             subset_size = int(self.cfg.saal_candidate_pool_size)
+        if subset_size is None and self.method_name == "bait" and self.cfg.bait_candidate_pool_size is not None:
+            subset_size = int(self.cfg.bait_candidate_pool_size)
         if subset_size is None or subset_size >= len(unlabeled_idx):
             return unlabeled_idx
         # Make acquisition candidate sampling reproducible per (seed, round).

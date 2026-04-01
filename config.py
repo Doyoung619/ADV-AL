@@ -64,6 +64,9 @@ class Config:
 
     mc_passes: int = 20
     entropy_use_mc: bool = False
+    batchbald_num_mc_samples: int = 100
+    batchbald_num_joint_entropy_samples: int = 10000
+    batchbald_exact_joint_entropy_steps: int = 4
 
     saal_rho: float = 0.05
     saal_norm: str = "linf"
@@ -93,10 +96,10 @@ class Config:
     tiny: float = 1e-8
     debug_save_hybrid_scores: bool = False
 
-    lambda_reg: float = 1e-2
-    candidate_cap: Optional[int] = 2048
-    bait_projection_dim: int = 256
-    bait_dtype: str = "float32"
+    bait_lambda: float = 1.0
+    bait_oversample_factor: int = 2
+    bait_candidate_pool_size: Optional[int] = None
+    bait_use_bias: bool = True
 
     fast_debug: bool = False
     save_checkpoints: bool = True
@@ -121,6 +124,15 @@ def _parse_optional_float(value: str) -> Optional[float]:
     if value.lower() in {"none", "null"}:
         return None
     return float(value)
+
+
+def _parse_bool(value: str) -> bool:
+    v = value.lower()
+    if v in {"1", "true", "t", "yes", "y"}:
+        return True
+    if v in {"0", "false", "f", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--acquisition-method",
         "--acquisition_method",
+        "--acq-method",
+        "--acq_method",
         type=str,
         default="badge",
         choices=[
@@ -221,6 +235,10 @@ def build_parser() -> argparse.ArgumentParser:
             "badge_adv_lagrangian",
             "bait",
             "bald",
+            "batchbald",
+            "coreset",
+            "kcenter",
+            "core_set",
             "bald_dual_a",
             "bald_dual_b",
             "bald_adv_lagrangian",
@@ -255,6 +273,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--mc-passes", type=int, default=20)
     parser.add_argument("--entropy-use-mc", action="store_true")
+    parser.add_argument(
+        "--batchbald-num-mc-samples",
+        "--batchbald_num_mc_samples",
+        dest="batchbald_num_mc_samples",
+        type=int,
+        default=100,
+    )
+    parser.add_argument(
+        "--batchbald-num-joint-entropy-samples",
+        "--batchbald_num_joint_entropy_samples",
+        dest="batchbald_num_joint_entropy_samples",
+        type=int,
+        default=10000,
+    )
+    parser.add_argument(
+        "--batchbald-exact-joint-entropy-steps",
+        "--batchbald_exact_joint_entropy_steps",
+        dest="batchbald_exact_joint_entropy_steps",
+        type=int,
+        default=4,
+    )
     parser.add_argument("--saal-rho", "--saal_rho", dest="saal_rho", type=float, default=0.05)
     parser.add_argument("--saal-norm", "--saal_norm", dest="saal_norm", choices=["linf", "l2"], default="linf")
     parser.add_argument("--saal-use-kmeanspp", action="store_true")
@@ -339,10 +378,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tiny", type=float, default=1e-8)
     parser.add_argument("--debug-save-hybrid-scores", action="store_true")
 
-    parser.add_argument("--lambda-reg", type=float, default=1e-2)
-    parser.add_argument("--candidate-cap", type=_parse_optional_int, default=2048)
-    parser.add_argument("--bait-projection-dim", type=int, default=256)
-    parser.add_argument("--bait-dtype", type=str, choices=["float32", "float64"], default="float32")
+    parser.add_argument(
+        "--bait-lambda",
+        "--bait_lambda",
+        "--lambda-reg",
+        "--lambda_reg",
+        dest="bait_lambda",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--bait-oversample-factor",
+        "--bait_oversample_factor",
+        dest="bait_oversample_factor",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--bait-candidate-pool-size",
+        "--bait_candidate_pool_size",
+        "--candidate-cap",
+        "--candidate_cap",
+        dest="bait_candidate_pool_size",
+        type=_parse_optional_int,
+        default=None,
+        help="Optional BAIT-specific acquisition subpool size (None uses existing pool selection).",
+    )
+    parser.add_argument(
+        "--bait-use-bias",
+        "--bait_use_bias",
+        dest="bait_use_bias",
+        type=_parse_bool,
+        default=True,
+    )
 
     parser.add_argument("--fast-debug", action="store_true")
     parser.add_argument("--save-checkpoints", action="store_true")
@@ -358,12 +426,15 @@ def apply_mode_overrides(cfg: Config) -> Config:
         cfg.num_rounds = min(cfg.num_rounds, 2)
         cfg.epochs_per_round = min(cfg.epochs_per_round, 5)
         cfg.mc_passes = min(cfg.mc_passes, 5)
+        cfg.batchbald_num_mc_samples = min(cfg.batchbald_num_mc_samples, 10)
+        cfg.batchbald_num_joint_entropy_samples = min(cfg.batchbald_num_joint_entropy_samples, 512)
+        cfg.batchbald_exact_joint_entropy_steps = min(cfg.batchbald_exact_joint_entropy_steps, 2)
         cfg.eval_pgd_steps = min(cfg.eval_pgd_steps, 3)
         cfg.acquisition_pgd_steps = min(cfg.acquisition_pgd_steps, 3)
         cfg.adv_pgd_steps = min(cfg.adv_pgd_steps, 3)
         cfg.saal_candidate_pool_size = min(cfg.saal_candidate_pool_size, 512)
-        if cfg.candidate_cap is None:
-            cfg.candidate_cap = 512
+        if cfg.bait_candidate_pool_size is not None:
+            cfg.bait_candidate_pool_size = min(cfg.bait_candidate_pool_size, 512)
     return cfg
 
 
@@ -380,6 +451,24 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
     if cfg.acquisition_pool_subset_size is not None and cfg.acquisition_pool_subset_size <= 0:
         raise ValueError(
             f"acquisition_pool_subset_size must be positive or None, got {cfg.acquisition_pool_subset_size}"
+        )
+    if cfg.batchbald_num_mc_samples <= 0:
+        raise ValueError(f"batchbald_num_mc_samples must be positive, got {cfg.batchbald_num_mc_samples}")
+    if cfg.batchbald_num_joint_entropy_samples <= 0:
+        raise ValueError(
+            "batchbald_num_joint_entropy_samples must be positive, "
+            f"got {cfg.batchbald_num_joint_entropy_samples}"
+        )
+    if cfg.batchbald_exact_joint_entropy_steps < 0:
+        raise ValueError(
+            "batchbald_exact_joint_entropy_steps must be non-negative, "
+            f"got {cfg.batchbald_exact_joint_entropy_steps}"
+        )
+    if cfg.bait_oversample_factor < 1:
+        raise ValueError(f"bait_oversample_factor must be >= 1, got {cfg.bait_oversample_factor}")
+    if cfg.bait_candidate_pool_size is not None and cfg.bait_candidate_pool_size <= 0:
+        raise ValueError(
+            f"bait_candidate_pool_size must be positive or None, got {cfg.bait_candidate_pool_size}"
         )
     if cfg.methods is not None:
         cfg.methods = [m.strip().lower() for m in cfg.methods.split(",") if m.strip()]

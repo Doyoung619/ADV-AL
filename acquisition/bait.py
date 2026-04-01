@@ -1,4 +1,3 @@
-import math
 import time
 from typing import Dict, Optional, Tuple
 
@@ -9,21 +8,68 @@ import torch.nn.functional as F
 from acquisition.utils import AcquisitionOutput, BaseAcquisition
 
 
+def _symmetrize(matrix: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (matrix + matrix.t())
+
+
+def _inverse_spd_with_jitter(
+    matrix: torch.Tensor,
+    base_jitter: float = 1e-12,
+    max_tries: int = 7,
+) -> torch.Tensor:
+    maybe_inv = _try_inverse_spd_with_jitter(matrix=matrix, base_jitter=base_jitter, max_tries=max_tries)
+    if maybe_inv is not None:
+        return maybe_inv
+    matrix = _symmetrize(matrix)
+    eye = torch.eye(matrix.size(0), dtype=matrix.dtype, device=matrix.device)
+    jitter = base_jitter * (10.0 ** max(max_tries - 1, 0))
+    return torch.linalg.pinv(matrix + jitter * eye)
+
+
+def _try_inverse_spd_with_jitter(
+    matrix: torch.Tensor,
+    base_jitter: float = 1e-12,
+    max_tries: int = 7,
+) -> Optional[torch.Tensor]:
+    matrix = _symmetrize(matrix)
+    eye = torch.eye(matrix.size(0), dtype=matrix.dtype, device=matrix.device)
+    jitter = 0.0
+    for _ in range(max_tries):
+        try:
+            chol = torch.linalg.cholesky(matrix + jitter * eye)
+            return torch.cholesky_inverse(chol)
+        except RuntimeError:
+            jitter = base_jitter if jitter == 0.0 else jitter * 10.0
+    return None
+
+
 @torch.no_grad()
-def compute_last_layer_features_and_probs(model, loader, device: Optional[torch.device] = None, progress_logger=None, tag: str = "BAIT"):
+def extract_last_layer_features_and_probs(
+    model,
+    loader,
+    device: Optional[torch.device] = None,
+    progress_logger=None,
+    tag: str = "BAIT",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if device is None:
         device = next(model.parameters()).device
     model.eval()
-    feats, probs, indices = [], [], []
+
+    feats = []
+    probs = []
+    indices = []
     total_batches = len(loader)
     t0 = time.perf_counter()
+
     for batch_idx, (images, _, batch_indices) in enumerate(loader, start=1):
         images = images.to(device, non_blocking=True)
-        logits, h = model(images, return_features=True)  # h: [B, D]
-        p = F.softmax(logits, dim=1)  # [B, C]
+        logits, h = model(images, return_features=True)
+        p = F.softmax(logits, dim=1)
+
         feats.append(h.cpu())
         probs.append(p.cpu())
         indices.append(batch_indices.clone())
+
         if progress_logger is not None and (batch_idx % 10 == 0 or batch_idx == total_batches):
             progress_logger.log_scoring_eta(
                 method=f"{tag}-feat",
@@ -32,95 +78,235 @@ def compute_last_layer_features_and_probs(model, loader, device: Optional[torch.
                 elapsed=time.perf_counter() - t0,
                 device=str(device),
             )
+
     return torch.cat(feats, dim=0), torch.cat(probs, dim=0), torch.cat(indices, dim=0)
 
 
-def compute_pointwise_fisher_factor(h: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+def _augment_features(features: torch.Tensor, use_bias: bool) -> torch.Tensor:
+    if not use_bias:
+        return features
+    ones = torch.ones((features.size(0), 1), dtype=features.dtype, device=features.device)
+    return torch.cat([features, ones], dim=1)
+
+
+def build_class_cov_factors(probs: torch.Tensor, eig_floor: float = 1e-12) -> torch.Tensor:
     """
-    Construct V_x such that I(x) = V_x V_x^T for:
-      I(x) = h h^T kron (diag(p) - p p^T)
-
-    Args:
-      h: [D]
-      p: [C]
-    Returns:
-      V_x: [C*D, r], r <= C (rank from eig factor of class covariance)
+    Build L_x with shape [N, C, C] such that:
+      C(p_x) = diag(p_x) - p_x p_x^T = L_x L_x^T.
     """
-    h = h.view(-1)
-    p = p.view(-1)
-    c = p.numel()
-    d = h.numel()
-
-    s = torch.diag(p) - torch.outer(p, p)  # [C, C]
-    eigvals, eigvecs = torch.linalg.eigh(s)
-    keep = eigvals > 1e-10
-    if keep.sum() == 0:
-        return torch.zeros((c * d, 1), dtype=h.dtype, device=h.device)
-
-    L = eigvecs[:, keep] * torch.sqrt(eigvals[keep]).unsqueeze(0)  # [C, r]
-    # kron(L[:, r], h) for each rank component r:
-    # output shape [C*D, r]
-    v = torch.einsum("cr,d->cdr", L, h).reshape(c * d, -1)
-    return v
+    cov = torch.diag_embed(probs) - probs.unsqueeze(2) * probs.unsqueeze(1)
+    eigvals, eigvecs = torch.linalg.eigh(cov)
+    clamped = torch.clamp(eigvals, min=0.0)
+    sqrt_vals = torch.sqrt(clamped)
+    sqrt_vals = torch.where(eigvals > eig_floor, sqrt_vals, torch.zeros_like(sqrt_vals))
+    return eigvecs * sqrt_vals.unsqueeze(1)
 
 
-def _make_projection(in_dim: int, projection_dim: int, seed: int, dtype: torch.dtype, device: torch.device):
-    if projection_dim <= 0 or projection_dim >= in_dim:
-        return None
-    gen = torch.Generator(device=device)
-    gen.manual_seed(seed)
-    # Gaussian random projection with 1/sqrt(m) scaling.
-    proj = torch.randn(projection_dim, in_dim, generator=gen, dtype=dtype, device=device) / math.sqrt(float(projection_dim))
-    return proj
+def build_classification_fisher_factor(feature: torch.Tensor, class_cov_factor: torch.Tensor) -> torch.Tensor:
+    """
+    Construct V_x for classification last layer.
+    Parameter vectorization is class-major:
+      vec(W) = [w_1; ...; w_C], w_c in R^d.
+    Then:
+      I(x) = C(p_x) kron (phi_x phi_x^T) = V_x V_x^T.
+    """
+    return torch.einsum("cr,d->cdr", class_cov_factor, feature).reshape(
+        class_cov_factor.size(0) * feature.numel(),
+        class_cov_factor.size(1),
+    )
 
 
-def _factor_projected(
-    h: torch.Tensor,
-    p: torch.Tensor,
-    projection: Optional[torch.Tensor],
-    dtype: torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    factor = compute_pointwise_fisher_factor(h.to(device=device, dtype=dtype), p.to(device=device, dtype=dtype))
-    if projection is not None:
-        factor = projection @ factor
-    return factor
-
-
-def _average_fisher(
+def accumulate_fisher_from_factors(
     features: torch.Tensor,
-    probs: torch.Tensor,
-    projection: Optional[torch.Tensor],
-    dtype: torch.dtype,
-    device: torch.device,
+    class_cov_factors: torch.Tensor,
     progress_logger=None,
     tag: str = "fisher",
 ) -> torch.Tensor:
-    dim = projection.size(0) if projection is not None else features.size(1) * probs.size(1)
-    fisher = torch.zeros((dim, dim), dtype=dtype, device=device)
-    n = features.size(0)
-    start = time.perf_counter()
-    for i in range(n):
-        # Runtime bottleneck: per-sample Fisher accumulation dominates BAIT scoring time.
-        v = _factor_projected(features[i], probs[i], projection, dtype=dtype, device=device)  # [dim, r]
-        fisher += v @ v.t()
-        if progress_logger is not None and ((i + 1) % 500 == 0 or i + 1 == n):
-            elapsed = time.perf_counter() - start
+    num_samples = features.size(0)
+    if num_samples == 0:
+        dim = features.size(1) * class_cov_factors.size(1)
+        return torch.zeros((dim, dim), dtype=features.dtype, device=features.device)
+
+    dim = features.size(1) * class_cov_factors.size(1)
+    fisher = torch.zeros((dim, dim), dtype=features.dtype, device=features.device)
+    t0 = time.perf_counter()
+    for i in range(num_samples):
+        factor = build_classification_fisher_factor(features[i], class_cov_factors[i])
+        fisher += factor @ factor.t()
+        if progress_logger is not None and ((i + 1) % 500 == 0 or (i + 1) == num_samples):
+            elapsed = time.perf_counter() - t0
             avg = elapsed / float(i + 1)
-            eta = avg * (n - (i + 1))
-            progress_logger.log(
-                f"[BAIT] {tag} {i + 1}/{n} elapsed={elapsed:.1f}s avg/item={avg:.4f}s eta={eta:.1f}s"
-            )
-    fisher /= max(1, n)
-    return fisher
+            eta = avg * float(num_samples - (i + 1))
+            progress_logger.log(f"[BAIT] {tag} {i + 1}/{num_samples} elapsed={elapsed:.1f}s eta={eta:.1f}s")
+    return fisher / float(num_samples)
 
 
-def _stable_inverse(matrix: torch.Tensor, jitter: float = 1e-6) -> torch.Tensor:
-    eye = torch.eye(matrix.size(0), device=matrix.device, dtype=matrix.dtype)
+def woodbury_trace_gain(
+    M_inv: torch.Tensor,
+    I_u: torch.Tensor,
+    factor: torch.Tensor,
+) -> Tuple[float, torch.Tensor, torch.Tensor]:
+    """
+    Forward score gain:
+      tr(V^T M^{-1} I_U M^{-1} V (I + V^T M^{-1} V)^{-1}).
+    """
+    U = M_inv @ factor
+    A = _symmetrize(torch.eye(factor.size(1), dtype=M_inv.dtype, device=M_inv.device) + factor.t() @ U)
+    A_inv = _inverse_spd_with_jitter(A)
+    core = U.t() @ (I_u @ U)
+    gain = float(torch.trace(core @ A_inv).item())
+    return gain, U, A_inv
+
+
+def update_inverse_with_factor(M_inv: torch.Tensor, U: torch.Tensor, A_inv: torch.Tensor) -> torch.Tensor:
+    return _symmetrize(M_inv - U @ A_inv @ U.t())
+
+
+def woodbury_trace_increase_downdate(
+    M_inv: torch.Tensor,
+    I_u: torch.Tensor,
+    factor: torch.Tensor,
+    pd_floor: float = 1e-10,
+) -> Optional[Tuple[float, torch.Tensor, torch.Tensor]]:
+    """
+    Backward score increase:
+      tr(V^T M^{-1} I_U M^{-1} V (I - V^T M^{-1} V)^{-1}).
+    Returns None when the downdate is not numerically valid.
+    """
+    U = M_inv @ factor
+    A = _symmetrize(torch.eye(factor.size(1), dtype=M_inv.dtype, device=M_inv.device) - factor.t() @ U)
+    eigvals = torch.linalg.eigvalsh(A)
+    min_eig = float(eigvals.min().item())
+    if min_eig < -1e-8:
+        return None
+
+    jitter = max(0.0, pd_floor - min_eig)
+    if jitter > 0.0:
+        A = A + jitter * torch.eye(A.size(0), dtype=A.dtype, device=A.device)
     try:
-        return torch.linalg.inv(matrix)
+        chol = torch.linalg.cholesky(A)
+        A_inv = torch.cholesky_inverse(chol)
     except RuntimeError:
-        return torch.linalg.pinv(matrix + jitter * eye)
+        return None
+
+    core = U.t() @ (I_u @ U)
+    increase = float(torch.trace(core @ A_inv).item())
+    return increase, U, A_inv
+
+
+def downdate_inverse_with_factor(M_inv: torch.Tensor, U: torch.Tensor, A_inv: torch.Tensor) -> torch.Tensor:
+    return _symmetrize(M_inv + U @ A_inv @ U.t())
+
+
+def bait_forward_greedy(
+    features: torch.Tensor,
+    class_cov_factors: torch.Tensor,
+    M_inv: torch.Tensor,
+    I_u: torch.Tensor,
+    oversample_count: int,
+    progress_logger=None,
+) -> Tuple[list, torch.Tensor, Dict[str, list]]:
+    num_unlabeled = features.size(0)
+    available = np.ones(num_unlabeled, dtype=bool)
+    selected = []
+    gains = []
+
+    for step in range(oversample_count):
+        candidate_indices = np.where(available)[0]
+        if candidate_indices.size == 0:
+            break
+
+        best_gain = -float("inf")
+        best_idx = None
+        best_terms = None
+
+        for idx in candidate_indices:
+            factor = build_classification_fisher_factor(features[int(idx)], class_cov_factors[int(idx)])
+            gain, U, A_inv = woodbury_trace_gain(M_inv=M_inv, I_u=I_u, factor=factor)
+            if gain > best_gain:
+                best_gain = gain
+                best_idx = int(idx)
+                best_terms = (U, A_inv)
+
+        if best_idx is None or best_terms is None:
+            break
+
+        M_inv = update_inverse_with_factor(M_inv, best_terms[0], best_terms[1])
+        available[best_idx] = False
+        selected.append(best_idx)
+        gains.append(best_gain)
+
+        if progress_logger is not None and (((step + 1) % 10 == 0) or (step + 1 == oversample_count)):
+            progress_logger.log(f"[BAIT] forward {step + 1}/{oversample_count} gain={best_gain:.6f}")
+
+    return selected, M_inv, {"forward_gains": gains}
+
+
+def bait_backward_prune(
+    features: torch.Tensor,
+    class_cov_factors: torch.Tensor,
+    forward_selected: list,
+    target_budget: int,
+    M_inv: torch.Tensor,
+    I_u: torch.Tensor,
+    progress_logger=None,
+) -> Tuple[list, torch.Tensor, Dict[str, list]]:
+    current = list(forward_selected)
+    increases = []
+    removed = []
+
+    while len(current) > target_budget:
+        best_idx = None
+        best_increase = float("inf")
+        best_terms = None
+
+        for idx in current:
+            factor = build_classification_fisher_factor(features[int(idx)], class_cov_factors[int(idx)])
+            candidate = woodbury_trace_increase_downdate(M_inv=M_inv, I_u=I_u, factor=factor)
+            if candidate is None:
+                continue
+            increase, U, A_inv = candidate
+            if increase < best_increase:
+                best_increase = increase
+                best_idx = int(idx)
+                best_terms = (U, A_inv)
+
+        if best_idx is None or best_terms is None:
+            # Robust fallback: direct check among removable points.
+            M_current = _inverse_spd_with_jitter(M_inv)
+            fallback_best = None
+            fallback_obj = float("inf")
+            fallback_inv = None
+            for idx in current:
+                factor = build_classification_fisher_factor(features[int(idx)], class_cov_factors[int(idx)])
+                M_candidate = _symmetrize(M_current - factor @ factor.t())
+                cand_inv = _try_inverse_spd_with_jitter(M_candidate)
+                if cand_inv is None:
+                    continue
+                obj = float(torch.trace(cand_inv @ I_u).item())
+                if obj < fallback_obj:
+                    fallback_obj = obj
+                    fallback_best = int(idx)
+                    fallback_inv = cand_inv
+            if fallback_best is None or fallback_inv is None:
+                raise RuntimeError(
+                    "BAIT backward pruning failed: no numerically valid downdate candidate. "
+                    "Try increasing --bait_lambda."
+                )
+            best_idx = fallback_best
+            best_increase = fallback_obj
+            M_inv = _symmetrize(fallback_inv)
+        else:
+            M_inv = downdate_inverse_with_factor(M_inv, best_terms[0], best_terms[1])
+
+        current.remove(best_idx)
+        removed.append(best_idx)
+        increases.append(best_increase)
+
+        if progress_logger is not None and ((len(current) % 10 == 0) or (len(current) == target_budget)):
+            progress_logger.log(f"[BAIT] backward keep={len(current)} increase={best_increase:.6f}")
+
+    return current, M_inv, {"backward_increases": increases, "removed_indices": removed}
 
 
 def select_bait(
@@ -128,173 +314,82 @@ def select_bait(
     probs: torch.Tensor,
     labeled_features: torch.Tensor,
     labeled_probs: torch.Tensor,
-    B: int,
+    budget: int,
     lambda_reg: float,
-    candidate_cap: Optional[int] = None,
-    projection_dim: int = 256,
-    seed: int = 0,
-    dtype: str = "float32",
+    oversample_factor: int,
+    use_bias: bool,
     progress_logger=None,
 ):
-    """
-    BAIT forward-backward selector in projected last-layer Fisher space.
+    if features.size(0) == 0 or budget <= 0:
+        return np.array([], dtype=np.int64), {"forward_gains": [], "backward_increases": []}
 
-    Forward:
-      pick 2B samples minimizing tr((M + I(x))^{-1} I_pool)
-    Backward:
-      remove B samples minimizing tr((M - I(x))^{-1} I_pool)
-    """
-    if features.size(0) == 0:
-        return np.array([], dtype=np.int64), {"forward_objectives": [], "backward_objectives": []}
-
-    torch_dtype = torch.float64 if dtype == "float64" else torch.float32
+    fisher_dtype = torch.float64
     device = torch.device("cpu")
 
-    n_unlabeled, feat_dim = features.shape
-    num_classes = probs.shape[1]
-    full_dim = feat_dim * num_classes
-    projection = _make_projection(full_dim, projection_dim=projection_dim, seed=seed, dtype=torch_dtype, device=device)
-    work_dim = projection.size(0) if projection is not None else full_dim
+    features = features.to(device=device, dtype=fisher_dtype)
+    probs = probs.to(device=device, dtype=fisher_dtype)
+    labeled_features = labeled_features.to(device=device, dtype=fisher_dtype)
+    labeled_probs = labeled_probs.to(device=device, dtype=fisher_dtype)
 
-    rng = np.random.default_rng(seed)
-    factor_cache: Dict[int, torch.Tensor] = {}
+    features = _augment_features(features, use_bias=use_bias)
+    labeled_features = _augment_features(labeled_features, use_bias=use_bias)
 
-    def get_unlabeled_factor(idx: int) -> torch.Tensor:
-        if idx not in factor_cache:
-            factor_cache[idx] = _factor_projected(features[idx], probs[idx], projection, dtype=torch_dtype, device=device)
-        return factor_cache[idx]
+    unlabeled_cov_factors = build_class_cov_factors(probs)
+    labeled_cov_factors = build_class_cov_factors(labeled_probs)
 
-    t_pool = time.perf_counter()
-    I_pool = _average_fisher(
+    t0 = time.perf_counter()
+    I_u = accumulate_fisher_from_factors(
         features=features,
-        probs=probs,
-        projection=projection,
-        dtype=torch_dtype,
-        device=device,
+        class_cov_factors=unlabeled_cov_factors,
         progress_logger=progress_logger,
-        tag="I_pool",
+        tag="I_U",
     )
-    pool_time = time.perf_counter() - t_pool
-
-    I_labeled = _average_fisher(
+    pool_fisher_time = time.perf_counter() - t0
+    I_labeled = accumulate_fisher_from_factors(
         features=labeled_features,
-        probs=labeled_probs,
-        projection=projection,
-        dtype=torch_dtype,
-        device=device,
+        class_cov_factors=labeled_cov_factors,
         progress_logger=progress_logger,
         tag="I_labeled",
     )
 
-    M0 = I_labeled + lambda_reg * torch.eye(work_dim, dtype=torch_dtype, device=device)
-    M_inv = _stable_inverse(M0)
+    dim = I_u.size(0)
+    M0 = I_labeled + float(lambda_reg) * torch.eye(dim, dtype=fisher_dtype, device=device)
+    M_inv = _inverse_spd_with_jitter(M0)
 
-    oversample = min(2 * B, n_unlabeled)
-    remaining_mask = np.ones(n_unlabeled, dtype=bool)
-    selected = []
-    forward_objectives = []
+    effective_budget = min(int(budget), int(features.size(0)))
+    oversample_target = min(max(effective_budget, int(oversample_factor) * effective_budget), int(features.size(0)))
 
-    for step in range(oversample):
-        available = np.where(remaining_mask)[0]
-        if len(available) == 0:
-            break
-        if candidate_cap is not None and len(available) > candidate_cap:
-            candidates = rng.choice(available, size=candidate_cap, replace=False)
-        else:
-            candidates = available
+    selected_forward, M_inv_after_forward, forward_debug = bait_forward_greedy(
+        features=features,
+        class_cov_factors=unlabeled_cov_factors,
+        M_inv=M_inv,
+        I_u=I_u,
+        oversample_count=oversample_target,
+        progress_logger=progress_logger,
+    )
 
-        base_trace = torch.trace(M_inv @ I_pool).item()
-        best_obj = float("inf")
-        best_idx = None
-
-        for idx in candidates:
-            # Runtime bottleneck: repeated candidate objective evaluation in greedy forward pass.
-            v = get_unlabeled_factor(int(idx))  # [work_dim, r]
-            u = M_inv @ v  # [work_dim, r]
-            mid = torch.eye(v.size(1), dtype=torch_dtype, device=device) + v.t() @ u
-            try:
-                mid_inv = torch.linalg.inv(mid)
-            except RuntimeError:
-                mid_inv = torch.linalg.pinv(mid)
-            iu = I_pool @ u
-            reduction = torch.trace(mid_inv @ (u.t() @ iu)).item()
-            obj = base_trace - reduction
-            if obj < best_obj:
-                best_obj = obj
-                best_idx = int(idx)
-
-        if best_idx is None:
-            break
-
-        v = get_unlabeled_factor(best_idx)
-        u = M_inv @ v
-        mid = torch.eye(v.size(1), dtype=torch_dtype, device=device) + v.t() @ u
-        mid_inv = _stable_inverse(mid)
-        M_inv = M_inv - u @ mid_inv @ u.t()
-
-        selected.append(best_idx)
-        remaining_mask[best_idx] = False
-        forward_objectives.append(best_obj)
-
-        if progress_logger is not None and ((step + 1) % 20 == 0 or step + 1 == oversample):
-            progress_logger.log(
-                f"[BAIT] forward {step + 1}/{oversample} best_obj={best_obj:.6f} cache={len(factor_cache)}"
-            )
-
-    current = selected.copy()
-    backward_objectives = []
-
-    while len(current) > B:
-        base_trace = torch.trace(M_inv @ I_pool).item()
-        best_remove_obj = float("inf")
-        best_remove_idx = None
-        best_terms = None
-
-        for idx in current:
-            # Runtime bottleneck: repeated downdate objective checks in backward pruning.
-            v = get_unlabeled_factor(int(idx))
-            u = M_inv @ v
-            mid = torch.eye(v.size(1), dtype=torch_dtype, device=device) - v.t() @ u
-            try:
-                mid_inv = torch.linalg.inv(mid)
-            except RuntimeError:
-                continue
-
-            iu = I_pool @ u
-            increase = torch.trace(mid_inv @ (u.t() @ iu)).item()
-            obj = base_trace + increase
-            if obj < best_remove_obj:
-                best_remove_obj = obj
-                best_remove_idx = int(idx)
-                best_terms = (u, mid_inv)
-
-        if best_remove_idx is None:
-            # Fall back to random drop in numerically degenerate cases.
-            best_remove_idx = int(current[-1])
-            v = get_unlabeled_factor(best_remove_idx)
-            u = M_inv @ v
-            mid = torch.eye(v.size(1), dtype=torch_dtype, device=device) - v.t() @ u
-            mid_inv = _stable_inverse(mid)
-            best_terms = (u, mid_inv)
-
-        u, mid_inv = best_terms
-        M_inv = M_inv + u @ mid_inv @ u.t()
-
-        current.remove(best_remove_idx)
-        backward_objectives.append(best_remove_obj)
-
-        if progress_logger is not None and (len(current) % 20 == 0 or len(current) == B):
-            progress_logger.log(f"[BAIT] backward keep={len(current)}/{B} best_obj={best_remove_obj:.6f}")
+    selected_final, _, backward_debug = bait_backward_prune(
+        features=features,
+        class_cov_factors=unlabeled_cov_factors,
+        forward_selected=selected_forward,
+        target_budget=effective_budget,
+        M_inv=M_inv_after_forward,
+        I_u=I_u,
+        progress_logger=progress_logger,
+    )
 
     debug = {
-        "forward_objectives": forward_objectives,
-        "backward_objectives": backward_objectives,
-        "pool_fisher_time_sec": pool_time,
-        "projection_dim": int(work_dim),
-        "full_dim": int(full_dim),
-        "candidate_cap": candidate_cap,
+        **forward_debug,
+        **backward_debug,
+        "pool_fisher_time_sec": float(pool_fisher_time),
+        "fisher_dim": int(dim),
+        "num_classes": int(probs.size(1)),
+        "feature_dim_with_bias": int(features.size(1)),
+        "oversample_target": int(oversample_target),
+        "lambda_reg": float(lambda_reg),
+        "use_bias": bool(use_bias),
     }
-    return np.asarray(current, dtype=np.int64), debug
+    return np.asarray(selected_final, dtype=np.int64), debug
 
 
 class BAITStrategy(BaseAcquisition):
@@ -309,11 +404,19 @@ class BAITStrategy(BaseAcquisition):
         progress_logger=None,
     ) -> AcquisitionOutput:
         t_score = time.perf_counter()
-        unlabeled_features, unlabeled_probs, _ = compute_last_layer_features_and_probs(
-            model, unlabeled_loader, device=device, progress_logger=progress_logger, tag="BAIT-unlabeled"
+        unlabeled_features, unlabeled_probs, _ = extract_last_layer_features_and_probs(
+            model=model,
+            loader=unlabeled_loader,
+            device=device,
+            progress_logger=progress_logger,
+            tag="BAIT-unlabeled",
         )
-        labeled_features, labeled_probs, _ = compute_last_layer_features_and_probs(
-            model, labeled_loader, device=device, progress_logger=progress_logger, tag="BAIT-labeled"
+        labeled_features, labeled_probs, _ = extract_last_layer_features_and_probs(
+            model=model,
+            loader=labeled_loader,
+            device=device,
+            progress_logger=progress_logger,
+            tag="BAIT-labeled",
         )
         scoring_time = time.perf_counter() - t_score
 
@@ -323,12 +426,10 @@ class BAITStrategy(BaseAcquisition):
             probs=unlabeled_probs,
             labeled_features=labeled_features,
             labeled_probs=labeled_probs,
-            B=budget,
-            lambda_reg=self.cfg.lambda_reg,
-            candidate_cap=self.cfg.candidate_cap,
-            projection_dim=self.cfg.bait_projection_dim,
-            seed=self.cfg.seed,
-            dtype=self.cfg.bait_dtype,
+            budget=budget,
+            lambda_reg=self.cfg.bait_lambda,
+            oversample_factor=self.cfg.bait_oversample_factor,
+            use_bias=self.cfg.bait_use_bias,
             progress_logger=progress_logger,
         )
         selection_time = time.perf_counter() - t_sel
