@@ -18,6 +18,12 @@ from acquisition.saal_dual_b import SAALDualBStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
 from acquisition.ours import OursGapStrategy, OursGradDispStrategy, OursHessianStrategy, OursStrategy
+from acquisition.pfilter import (
+    BALDPercentileBALDStrategy,
+    BALDPercentileRandomStrategy,
+    EntropyPercentileEntropyStrategy,
+    EntropyPercentileRandomStrategy,
+)
 from acquisition.random_sampling import RandomStrategy
 
 # Temporary comment for remote push verification.
@@ -40,6 +46,10 @@ METHOD_REGISTRY = {
     "bait": BAITStrategy,
     "bald": BALDStrategy,
     "batchbald": BatchBALDStrategy,
+    "entropy_pfilter_random": EntropyPercentileRandomStrategy,
+    "entropy_pfilter_entropy": EntropyPercentileEntropyStrategy,
+    "bald_pfilter_random": BALDPercentileRandomStrategy,
+    "bald_pfilter_bald": BALDPercentileBALDStrategy,
     "coreset": CoreSetStrategy,
     "kcenter": CoreSetStrategy,
     "core_set": CoreSetStrategy,

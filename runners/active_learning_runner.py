@@ -13,8 +13,8 @@ from datasets import (
     build_loader,
     full_test_indices,
     full_train_indices,
-    get_cifar10_transforms,
-    load_cifar10,
+    get_dataset_transforms,
+    load_dataset,
 )
 from eval import (
     eval_avg_logit_mismatch,
@@ -278,11 +278,16 @@ class ActiveLearningRunner:
 
         exp_timer = Timer().start()
         data_timer = Timer().start()
-        train_base, test_base = load_cifar10(
-            self.cfg.data_dir,
+        train_base, test_base = load_dataset(
+            dataset_name=self.cfg.dataset,
+            data_dir=self.cfg.data_dir,
             download_if_missing=self.cfg.download_if_missing,
         )
-        train_tf, eval_tf = get_cifar10_transforms(self.cfg.cifar10_mean, self.cfg.cifar10_std)
+        train_tf, eval_tf = get_dataset_transforms(
+            dataset_name=self.cfg.dataset,
+            mean=self.cfg.cifar10_mean,
+            std=self.cfg.cifar10_std,
+        )
         full_train_idx = full_train_indices(train_base)
         test_idx = full_test_indices(test_base)
         al_train_idx, fixed_val_idx = self._build_fixed_val_split(

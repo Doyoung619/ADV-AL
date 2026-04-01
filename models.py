@@ -135,11 +135,44 @@ class CIFARSmallCNNDropout(nn.Module):
         return logits
 
 
+class CIFARVGG16Dropout(nn.Module):
+    """
+    VGG16 backbone adapted for small-image active learning benchmarks.
+    Uses features -> adaptive pool -> linear classifier with dropout.
+    """
+
+    def __init__(self, num_classes: int = 10, dropout_p: float = 0.2):
+        super().__init__()
+        backbone = tv_models.vgg16(weights=None)
+        self.features = backbone.features
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.feature_dim = 512
+        self.dropout = nn.Dropout(p=dropout_p)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        return torch.flatten(x, 1)
+
+    def forward_classifier(self, features: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.dropout(features))
+
+    def forward(self, x: torch.Tensor, return_features: bool = False):
+        features = self.forward_features(x)
+        logits = self.forward_classifier(features)
+        if return_features:
+            return logits, features
+        return logits
+
+
 def build_model(model_name: str = "small_cnn", num_classes: int = 10, dropout_p: float = 0.2) -> nn.Module:
     if model_name == "resnet18":
         return CIFARResNet18Dropout(num_classes=num_classes, dropout_p=dropout_p)
     if model_name == "resnet10":
         return CIFARResNetDropout(layers=[1, 1, 1, 1], num_classes=num_classes, dropout_p=dropout_p)
+    if model_name == "vgg16":
+        return CIFARVGG16Dropout(num_classes=num_classes, dropout_p=dropout_p)
     if model_name == "small_cnn":
         return CIFARSmallCNNDropout(num_classes=num_classes, dropout_p=dropout_p)
     raise ValueError(f"Unsupported model: {model_name}")

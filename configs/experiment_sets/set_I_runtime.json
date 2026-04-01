@@ -1,0 +1,29 @@
+{
+  "datasets": [
+    "cifar10"
+  ],
+  "models": [
+    "small_cnn"
+  ],
+  "methods": [
+    "random",
+    "badge",
+    "bait",
+    "batchbald",
+    "ours_entropy_p10",
+    "ours_bald_p10",
+    "ours_saal_p10",
+    "ours_badge_p10"
+  ],
+  "initial_labeled_size": 500,
+  "acquisition_size": 200,
+  "rounds": 10,
+  "epochs_per_round": 50,
+  "eval_epsilon": 0.00392156862745098,
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "description": "Runtime / practicality"
+}

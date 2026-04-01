@@ -1,0 +1,35 @@
+{
+  "datasets": [
+    "cifar10",
+    "svhn"
+  ],
+  "models": [
+    "small_cnn"
+  ],
+  "methods": [
+    "entropy_p10_random",
+    "entropy_p10_entropy",
+    "ours_entropy_p10",
+    "bald_p10_random",
+    "bald_p10_bald",
+    "ours_bald_p10"
+  ],
+  "initial_labeled_size": 500,
+  "acquisition_size": 200,
+  "rounds": 10,
+  "epochs_per_round": 50,
+  "eval_epsilon": 0.00392156862745098,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "description": "Decomposition / mechanism"
+}

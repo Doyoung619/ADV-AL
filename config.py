@@ -4,6 +4,8 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
+from datasets import default_dataset_stats
+
 
 @dataclass
 class Config:
@@ -137,14 +139,14 @@ def _parse_bool(value: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pool-based active learning benchmark on CIFAR-10.")
-    parser.add_argument("--dataset", type=str, default="cifar10")
+    parser.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "svhn", "fashionmnist"])
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--download-if-missing", action="store_true")
     parser.add_argument("--output-dir", type=str, default="./outputs")
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--resume-run-dir", type=str, default=None)
 
-    parser.add_argument("--model", type=str, default="small_cnn", choices=["resnet18", "resnet10", "small_cnn"])
+    parser.add_argument("--model", type=str, default="small_cnn", choices=["resnet18", "resnet10", "small_cnn", "vgg16"])
     parser.add_argument("--dropout-p", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", type=str, default="cuda")
@@ -236,6 +238,10 @@ def build_parser() -> argparse.ArgumentParser:
             "bait",
             "bald",
             "batchbald",
+            "entropy_pfilter_random",
+            "entropy_pfilter_entropy",
+            "bald_pfilter_random",
+            "bald_pfilter_bald",
             "coreset",
             "kcenter",
             "core_set",
@@ -438,10 +444,20 @@ def apply_mode_overrides(cfg: Config) -> Config:
     return cfg
 
 
+def _apply_dataset_defaults(cfg: Config) -> Config:
+    mean, std = default_dataset_stats(cfg.dataset)
+    cfg.cifar10_mean = tuple(float(x) for x in mean)
+    cfg.cifar10_std = tuple(float(x) for x in std)
+    # Current benchmark datasets in this project are all 10-way classification.
+    cfg.num_classes = 10
+    return cfg
+
+
 def parse_config(argv: Optional[List[str]] = None) -> Config:
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = Config(**vars(args))
+    cfg = _apply_dataset_defaults(cfg)
     if not (0.0 <= cfg.dual_percentile <= 1.0):
         raise ValueError(f"dual_percentile must be in [0, 1], got {cfg.dual_percentile}")
     if cfg.saal_rho < 0.0:
