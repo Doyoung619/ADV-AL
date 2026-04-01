@@ -85,6 +85,53 @@ def _is_completed_from_command(cmd: str) -> bool:
         return False
 
 
+def _has_partial_progress(run_dir: str) -> bool:
+    markers = [
+        "round_metrics.json",
+        "train_history.json",
+        "timing_log.json",
+    ]
+    for name in markers:
+        if os.path.exists(os.path.join(run_dir, name)):
+            return True
+    if os.path.exists(os.path.join(run_dir, "selected_indices")):
+        return True
+    if os.path.exists(os.path.join(run_dir, "round_00")):
+        return True
+    return False
+
+
+def _inject_resume_run_dir(body: str) -> Tuple[str, bool]:
+    # commands_all.txt lines are generated as:
+    #   <python main.py ...args...> > <log_path> 2>&1
+    # Inject --resume-run-dir when a run_dir already exists with partial outputs.
+    prefix, sep, suffix = body.partition(" > ")
+    cmd_part = prefix if sep else body
+    redirect_part = f" > {suffix}" if sep else ""
+
+    try:
+        tokens = shlex.split(cmd_part)
+    except Exception:
+        return body, False
+
+    if "--resume-run-dir" in tokens:
+        return body, False
+
+    output_dir = _parse_arg(tokens, "--output-dir", "")
+    run_name = _parse_arg(tokens, "--run-name", "")
+    if output_dir == "" or run_name == "":
+        return body, False
+
+    run_dir = os.path.join(output_dir, run_name)
+    if not os.path.isdir(run_dir):
+        return body, False
+    if not _has_partial_progress(run_dir):
+        return body, False
+
+    resumed_cmd = f"{cmd_part} --resume-run-dir {shlex.quote(run_dir)}{redirect_part}"
+    return resumed_cmd, True
+
+
 def _pick_gpu(gpu_ids: List[int], running_by_gpu: Dict[int, int], jobs_per_gpu: int) -> int:
     candidates = [g for g in gpu_ids if running_by_gpu.get(g, 0) < jobs_per_gpu]
     if not candidates:
@@ -133,13 +180,15 @@ def main():
                 break
             cmd = pending.pop(0)
             body = _strip_cuda_prefix(cmd)
+            body, resumed = _inject_resume_run_dir(body)
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(gid)
             proc = subprocess.Popen(body, shell=True, env=env)
             running.append({"proc": proc, "gpu": gid, "cmd": body, "start": time.time()})
             running_by_gpu[gid] = running_by_gpu.get(gid, 0) + 1
             exp_tag = _experiment_tag_from_command(cmd)
-            print(f"[launch] START gpu={gid} pid={proc.pid} run={exp_tag} cmd={body[:140]}...")
+            resume_tag = " resume=auto" if resumed else ""
+            print(f"[launch] START gpu={gid} pid={proc.pid} run={exp_tag}{resume_tag} cmd={body[:140]}...")
 
         # Poll running jobs.
         still_running = []

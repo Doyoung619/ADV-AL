@@ -137,7 +137,10 @@ def accumulate_fisher_from_factors(
             elapsed = time.perf_counter() - t0
             avg = elapsed / float(i + 1)
             eta = avg * float(num_samples - (i + 1))
-            progress_logger.log(f"[BAIT] {tag} {i + 1}/{num_samples} elapsed={elapsed:.1f}s eta={eta:.1f}s")
+            progress_logger.log(
+                f"[BAIT] {tag} {i + 1}/{num_samples} elapsed={elapsed:.1f}s eta={eta:.1f}s",
+                device=str(features.device),
+            )
     return fisher / float(num_samples)
 
 
@@ -237,7 +240,10 @@ def bait_forward_greedy(
         gains.append(best_gain)
 
         if progress_logger is not None and (((step + 1) % 10 == 0) or (step + 1 == oversample_count)):
-            progress_logger.log(f"[BAIT] forward {step + 1}/{oversample_count} gain={best_gain:.6f}")
+            progress_logger.log(
+                f"[BAIT] forward {step + 1}/{oversample_count} gain={best_gain:.6f}",
+                device=str(features.device),
+            )
 
     return selected, M_inv, {"forward_gains": gains}
 
@@ -304,7 +310,10 @@ def bait_backward_prune(
         increases.append(best_increase)
 
         if progress_logger is not None and ((len(current) % 10 == 0) or (len(current) == target_budget)):
-            progress_logger.log(f"[BAIT] backward keep={len(current)} increase={best_increase:.6f}")
+            progress_logger.log(
+                f"[BAIT] backward keep={len(current)} increase={best_increase:.6f}",
+                device=str(features.device),
+            )
 
     return current, M_inv, {"backward_increases": increases, "removed_indices": removed}
 
@@ -318,13 +327,13 @@ def select_bait(
     lambda_reg: float,
     oversample_factor: int,
     use_bias: bool,
+    device: torch.device,
     progress_logger=None,
 ):
     if features.size(0) == 0 or budget <= 0:
         return np.array([], dtype=np.int64), {"forward_gains": [], "backward_increases": []}
 
     fisher_dtype = torch.float64
-    device = torch.device("cpu")
 
     features = features.to(device=device, dtype=fisher_dtype)
     probs = probs.to(device=device, dtype=fisher_dtype)
@@ -430,6 +439,7 @@ class BAITStrategy(BaseAcquisition):
             lambda_reg=self.cfg.bait_lambda,
             oversample_factor=self.cfg.bait_oversample_factor,
             use_bias=self.cfg.bait_use_bias,
+            device=device,
             progress_logger=progress_logger,
         )
         selection_time = time.perf_counter() - t_sel
