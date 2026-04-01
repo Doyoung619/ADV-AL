@@ -177,7 +177,7 @@ class CoreSetStrategy(BaseAcquisition):
             unlabeled_features=unlabeled_features,
             labeled_features=labeled_features,
             budget=budget,
-            chunk_size=2048,
+            chunk_size=int(self.cfg.coreset_chunk_size),
             progress_logger=progress_logger,
         )
         selection_time = time.perf_counter() - t_sel

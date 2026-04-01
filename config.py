@@ -66,9 +66,12 @@ class Config:
 
     mc_passes: int = 20
     entropy_use_mc: bool = False
-    batchbald_num_mc_samples: int = 100
-    batchbald_num_joint_entropy_samples: int = 10000
-    batchbald_exact_joint_entropy_steps: int = 4
+    # Speed-priority defaults for BatchBALD.
+    batchbald_num_mc_samples: int = 32
+    batchbald_num_joint_entropy_samples: int = 2048
+    batchbald_exact_joint_entropy_steps: int = 2
+    # Larger chunk improves throughput in CoreSet distance computation on modern CPUs.
+    coreset_chunk_size: int = 8192
 
     saal_rho: float = 0.05
     saal_norm: str = "linf"
@@ -284,22 +287,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--batchbald_num_mc_samples",
         dest="batchbald_num_mc_samples",
         type=int,
-        default=100,
+        default=32,
     )
     parser.add_argument(
         "--batchbald-num-joint-entropy-samples",
         "--batchbald_num_joint_entropy_samples",
         dest="batchbald_num_joint_entropy_samples",
         type=int,
-        default=10000,
+        default=2048,
     )
     parser.add_argument(
         "--batchbald-exact-joint-entropy-steps",
         "--batchbald_exact_joint_entropy_steps",
         dest="batchbald_exact_joint_entropy_steps",
         type=int,
-        default=4,
+        default=2,
     )
+    parser.add_argument("--coreset-chunk-size", "--coreset_chunk_size", dest="coreset_chunk_size", type=int, default=8192)
     parser.add_argument("--saal-rho", "--saal_rho", dest="saal_rho", type=float, default=0.05)
     parser.add_argument("--saal-norm", "--saal_norm", dest="saal_norm", choices=["linf", "l2"], default="linf")
     parser.add_argument("--saal-use-kmeanspp", action="store_true")
@@ -480,6 +484,8 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
             "batchbald_exact_joint_entropy_steps must be non-negative, "
             f"got {cfg.batchbald_exact_joint_entropy_steps}"
         )
+    if cfg.coreset_chunk_size <= 0:
+        raise ValueError(f"coreset_chunk_size must be positive, got {cfg.coreset_chunk_size}")
     if cfg.bait_oversample_factor < 1:
         raise ValueError(f"bait_oversample_factor must be >= 1, got {cfg.bait_oversample_factor}")
     if cfg.bait_candidate_pool_size is not None and cfg.bait_candidate_pool_size <= 0:
