@@ -55,6 +55,31 @@ EXPERIMENT_SET_DEFINITIONS: Dict[str, Dict] = {
         ),
         "description": "Main flagship comparison",
     },
+    "set_A_vgg_only": {
+        **_base(
+            datasets=["cifar10", "svhn", "fashionmnist"],
+            models=["vgg16"],
+            methods=[
+                "random",
+                "saal",
+                "coreset",
+                "badge",
+                "bait",
+                "batchbald",
+                "ours_entropy_p10",
+                "ours_bald_p10",
+                "ours_saal_p10",
+                "ours_badge_p10",
+            ],
+            initial_labeled_size=500,
+            acquisition_size=200,
+            rounds=10,
+            epochs_per_round=80,
+            eval_epsilon=1.0 / 255.0,
+            seeds=DEFAULT_SEEDS_10,
+        ),
+        "description": "Experiment A with VGG16 only",
+    },
     "set_B_decomposition": {
         **_base(
             datasets=["cifar10", "svhn"],

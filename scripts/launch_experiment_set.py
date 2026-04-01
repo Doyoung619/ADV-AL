@@ -39,6 +39,29 @@ def _parse_arg(tokens: List[str], key: str, default: str = "") -> str:
     return default
 
 
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _experiment_tag_from_command(cmd: str) -> str:
+    body = _strip_cuda_prefix(cmd)
+    try:
+        tokens = shlex.split(body)
+    except Exception:
+        return "unknown"
+    output_dir = _parse_arg(tokens, "--output-dir", "")
+    run_name = _parse_arg(tokens, "--run-name", "")
+    if output_dir and run_name:
+        return os.path.join(output_dir, run_name)
+    if run_name:
+        return run_name
+    return "unknown"
+
+
 def _is_completed_from_command(cmd: str) -> bool:
     body = _strip_cuda_prefix(cmd)
     try:
@@ -115,7 +138,8 @@ def main():
             proc = subprocess.Popen(body, shell=True, env=env)
             running.append({"proc": proc, "gpu": gid, "cmd": body, "start": time.time()})
             running_by_gpu[gid] = running_by_gpu.get(gid, 0) + 1
-            print(f"[launch] START gpu={gid} pid={proc.pid} cmd={body[:140]}...")
+            exp_tag = _experiment_tag_from_command(cmd)
+            print(f"[launch] START gpu={gid} pid={proc.pid} run={exp_tag} cmd={body[:140]}...")
 
         # Poll running jobs.
         still_running = []
@@ -128,11 +152,13 @@ def main():
             gid = int(item["gpu"])
             running_by_gpu[gid] = max(0, running_by_gpu.get(gid, 0) - 1)
             elapsed = time.time() - float(item["start"])
+            exp_tag = _experiment_tag_from_command(item["cmd"])
+            elapsed_hms = _format_elapsed(elapsed)
             if rc != 0:
                 failures += 1
-                print(f"[launch] FAIL gpu={gid} pid={proc.pid} rc={rc} elapsed={elapsed:.1f}s")
+                print(f"[launch] FAIL gpu={gid} pid={proc.pid} rc={rc} run={exp_tag} elapsed={elapsed_hms} ({elapsed:.1f}s)")
             else:
-                print(f"[launch] DONE gpu={gid} pid={proc.pid} elapsed={elapsed:.1f}s")
+                print(f"[launch] DONE gpu={gid} pid={proc.pid} run={exp_tag} elapsed={elapsed_hms} ({elapsed:.1f}s)")
         running = still_running
         time.sleep(float(args.poll_sec))
 
