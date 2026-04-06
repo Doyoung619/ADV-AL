@@ -17,6 +17,7 @@ from acquisition.saal import SAALStrategy
 from acquisition.saal_dual_b import SAALDualBStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
+from acquisition.logdet_adv_disp import LogDetAdvDispStrategy
 from acquisition.ours import OursGapStrategy, OursGradDispStrategy, OursHessianStrategy, OursStrategy
 from acquisition.pfilter import (
     BALDPercentileBALDStrategy,
@@ -38,6 +39,9 @@ METHOD_REGISTRY = {
     "saal_dual_b": SAALDualBStrategy,
     "margin": MarginStrategy,
     "margin_dual_b": MarginDualBStrategy,
+    "logdet_adv_disp": LogDetAdvDispStrategy,
+    "semantic_logdet": LogDetAdvDispStrategy,
+    "adv_displacement_logdet": LogDetAdvDispStrategy,
     "badge": BADGEStrategy,
     "badge_dual_a": BADGEDualAStrategy,
     "badge_dual_b": BADGEDualBStrategy,

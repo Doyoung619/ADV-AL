@@ -56,6 +56,24 @@ Implementation details:
 - Feasible set: `F_b = {x | b(x) >= kappa_b}`
 - Compute `c(x)` and select top-`B` by `c(x)` within `F_b`
 
+### `logdet_adv_disp`
+- Computes adversarial semantic displacement vectors:
+  - `Delta(x) = z(x + delta*(x)) - z(x)`
+  - `delta*(x)` approximately maximizes `||z(x+delta)-z(x)||_2^2` under `||delta||_inf <= epsilon`
+- Embedding for this method is logits (`g(x) = z(x)`).
+- Selects a batch greedily by maximizing:
+  - `log det(lambda I + sum_{x in B} Delta(x) Delta(x)^T)`
+- Greedy marginal score at each step:
+  - `s(x) = Delta(x)^T A^{-1} Delta(x)`
+  - with rank-1 Sherman-Morrison inverse update.
+- Default method hyperparameters:
+  - `--logdet-adv-disp-attack fgsm`
+  - `--logdet-adv-disp-epsilon 1/255`
+  - `--logdet-adv-disp-lambda 1e-3`
+  - `--logdet-adv-disp-pgd-steps 5`
+  - `--logdet-adv-disp-pgd-step-size None` (auto = `epsilon / max(steps/2, 1)`)
+  - `--logdet-adv-disp-pgd-random-start`
+
 ## Logging and Outputs
 
 Per round, logs include:
@@ -88,6 +106,16 @@ Single run:
 python main.py --acquisition_method badge
 python main.py --acquisition_method badge_dual_a
 python main.py --acquisition_method badge_dual_b
+python main.py --acquisition_method logdet_adv_disp \
+  --logdet-adv-disp-attack fgsm \
+  --logdet-adv-disp-epsilon 0.0039215686 \
+  --logdet-adv-disp-lambda 1e-3
+python main.py --acquisition_method logdet_adv_disp \
+  --logdet-adv-disp-attack pgd \
+  --logdet-adv-disp-epsilon 0.0039215686 \
+  --logdet-adv-disp-pgd-steps 10 \
+  --logdet-adv-disp-pgd-step-size 0.0007843137 \
+  --logdet-adv-disp-pgd-random-start
 ```
 
 Full sweep:

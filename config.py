@@ -56,6 +56,15 @@ class Config:
     acquisition_attack: str = "pgd"
     acquisition_pgd_steps: int = 5
     acquisition_pgd_alpha: float = 2.0 / 255.0
+    logdet_adv_disp_attack: str = "fgsm"
+    logdet_adv_disp_attack_norm: str = "linf"
+    logdet_adv_disp_epsilon: float = 1.0 / 255.0
+    logdet_adv_disp_lambda: float = 1e-3
+    logdet_adv_disp_pgd_steps: int = 5
+    logdet_adv_disp_pgd_step_size: Optional[float] = None
+    logdet_adv_disp_pgd_random_start: bool = True
+    logdet_adv_disp_score_chunk_size: int = 8192
+    logdet_adv_disp_jitter: float = 1e-8
     ours_delta_objective: str = "logit_mismatch"
     ours_hessian_lambda: float = 1e-3
     ours_gap_use_fixed_clean_classes: bool = True
@@ -255,6 +264,9 @@ def build_parser() -> argparse.ArgumentParser:
             "ours_hessian",
             "ours_gap",
             "ours_grad_disp",
+            "logdet_adv_disp",
+            "semantic_logdet",
+            "adv_displacement_logdet",
         ],
     )
     parser.add_argument("--run-all-methods", action="store_true")
@@ -265,6 +277,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--acquisition-attack", choices=["fgsm", "pgd"], default="pgd")
     parser.add_argument("--acquisition-pgd-steps", type=int, default=5)
     parser.add_argument("--acquisition-pgd-alpha", type=float, default=2.0 / 255.0)
+    parser.add_argument("--logdet-adv-disp-attack", choices=["fgsm", "pgd"], default="fgsm")
+    parser.add_argument("--logdet-adv-disp-attack-norm", choices=["linf"], default="linf")
+    parser.add_argument("--logdet-adv-disp-epsilon", type=float, default=1.0 / 255.0)
+    parser.add_argument("--logdet-adv-disp-lambda", type=float, default=1e-3)
+    parser.add_argument("--logdet-adv-disp-pgd-steps", type=int, default=5)
+    parser.add_argument(
+        "--logdet-adv-disp-pgd-step-size",
+        type=_parse_optional_float,
+        default=None,
+    )
+    parser.add_argument("--logdet-adv-disp-pgd-random-start", action="store_true")
+    parser.add_argument(
+        "--no-logdet-adv-disp-pgd-random-start",
+        dest="logdet_adv_disp_pgd_random_start",
+        action="store_false",
+    )
+    parser.set_defaults(logdet_adv_disp_pgd_random_start=True)
+    parser.add_argument("--logdet-adv-disp-score-chunk-size", type=int, default=8192)
+    parser.add_argument("--logdet-adv-disp-jitter", type=float, default=1e-8)
     parser.add_argument(
         "--ours-delta-objective",
         type=str,
@@ -442,6 +473,7 @@ def apply_mode_overrides(cfg: Config) -> Config:
         cfg.eval_pgd_steps = min(cfg.eval_pgd_steps, 3)
         cfg.acquisition_pgd_steps = min(cfg.acquisition_pgd_steps, 3)
         cfg.adv_pgd_steps = min(cfg.adv_pgd_steps, 3)
+        cfg.logdet_adv_disp_pgd_steps = min(cfg.logdet_adv_disp_pgd_steps, 3)
         cfg.saal_candidate_pool_size = min(cfg.saal_candidate_pool_size, 512)
         if cfg.bait_candidate_pool_size is not None:
             cfg.bait_candidate_pool_size = min(cfg.bait_candidate_pool_size, 512)
@@ -492,6 +524,23 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         raise ValueError(
             f"bait_candidate_pool_size must be positive or None, got {cfg.bait_candidate_pool_size}"
         )
+    if cfg.logdet_adv_disp_epsilon <= 0.0:
+        raise ValueError(f"logdet_adv_disp_epsilon must be positive, got {cfg.logdet_adv_disp_epsilon}")
+    if cfg.logdet_adv_disp_lambda <= 0.0:
+        raise ValueError(f"logdet_adv_disp_lambda must be positive, got {cfg.logdet_adv_disp_lambda}")
+    if cfg.logdet_adv_disp_pgd_steps <= 0:
+        raise ValueError(f"logdet_adv_disp_pgd_steps must be positive, got {cfg.logdet_adv_disp_pgd_steps}")
+    if cfg.logdet_adv_disp_pgd_step_size is not None and cfg.logdet_adv_disp_pgd_step_size <= 0.0:
+        raise ValueError(
+            "logdet_adv_disp_pgd_step_size must be positive or None, "
+            f"got {cfg.logdet_adv_disp_pgd_step_size}"
+        )
+    if cfg.logdet_adv_disp_score_chunk_size <= 0:
+        raise ValueError(
+            f"logdet_adv_disp_score_chunk_size must be positive, got {cfg.logdet_adv_disp_score_chunk_size}"
+        )
+    if cfg.logdet_adv_disp_jitter <= 0.0:
+        raise ValueError(f"logdet_adv_disp_jitter must be positive, got {cfg.logdet_adv_disp_jitter}")
     if cfg.methods is not None:
         cfg.methods = [m.strip().lower() for m in cfg.methods.split(",") if m.strip()]
     cfg = apply_mode_overrides(cfg)

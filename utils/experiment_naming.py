@@ -19,7 +19,19 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
     Map orchestration canonical names to repository CLI method + args.
     """
     m = method_slug(method_name)
-    if m in {"random", "saal", "coreset", "kcenter", "core_set", "badge", "bait", "batchbald"}:
+    if m in {
+        "random",
+        "saal",
+        "coreset",
+        "kcenter",
+        "core_set",
+        "badge",
+        "bait",
+        "batchbald",
+        "logdet_adv_disp",
+        "semantic_logdet",
+        "adv_displacement_logdet",
+    }:
         return m, {}
     if m == "ours_l2":
         return "ours", {}
