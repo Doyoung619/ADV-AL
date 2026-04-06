@@ -67,6 +67,12 @@ class Config:
     logdet_adv_disp_score_chunk_size: int = 8192
     logdet_adv_disp_jitter: float = 1e-8
     logdet_adv_disp_percentile: float = 0.0
+    logdet_adv_disp_swap_max_rounds: int = 3
+    logdet_adv_disp_swap_top_unselected: int = 200
+    logdet_adv_disp_swap_top_selected: int = 0
+    logdet_adv_disp_swap_improvement_tol: float = 1e-8
+    logdet_adv_disp_swap_downdate_tol: float = 1e-6
+    logdet_adv_disp_swap_jitter: float = 1e-8
     ours_delta_objective: str = "logit_mismatch"
     ours_hessian_lambda: float = 1e-3
     ours_gap_use_fixed_clean_classes: bool = True
@@ -270,8 +276,20 @@ def build_parser() -> argparse.ArgumentParser:
             "logdet_adv_disp_p10",
             "logdet_adv_disp_p20",
             "logdet_adv_disp_p25",
+            "logdet_adv_disp_swap",
+            "logdet_adv_disp_swap_p10",
+            "logdet_adv_disp_swap_p20",
+            "logdet_adv_disp_swap_p25",
             "semantic_logdet",
+            "semantic_logdet_swap",
+            "semantic_logdet_swap_p10",
+            "semantic_logdet_swap_p20",
+            "semantic_logdet_swap_p25",
             "adv_displacement_logdet",
+            "adv_displacement_logdet_swap",
+            "adv_displacement_logdet_swap_p10",
+            "adv_displacement_logdet_swap_p20",
+            "adv_displacement_logdet_swap_p25",
         ],
     )
     parser.add_argument("--run-all-methods", action="store_true")
@@ -302,6 +320,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--logdet-adv-disp-score-chunk-size", type=int, default=8192)
     parser.add_argument("--logdet-adv-disp-jitter", type=float, default=1e-8)
     parser.add_argument("--logdet-adv-disp-percentile", type=float, default=0.0)
+    parser.add_argument("--logdet-adv-disp-swap-max-rounds", type=int, default=3)
+    parser.add_argument("--logdet-adv-disp-swap-top-unselected", type=int, default=200)
+    parser.add_argument("--logdet-adv-disp-swap-top-selected", type=int, default=0)
+    parser.add_argument("--logdet-adv-disp-swap-improvement-tol", type=float, default=1e-8)
+    parser.add_argument("--logdet-adv-disp-swap-downdate-tol", type=float, default=1e-6)
+    parser.add_argument("--logdet-adv-disp-swap-jitter", type=float, default=1e-8)
     parser.add_argument(
         "--ours-delta-objective",
         type=str,
@@ -480,6 +504,7 @@ def apply_mode_overrides(cfg: Config) -> Config:
         cfg.acquisition_pgd_steps = min(cfg.acquisition_pgd_steps, 3)
         cfg.adv_pgd_steps = min(cfg.adv_pgd_steps, 3)
         cfg.logdet_adv_disp_pgd_steps = min(cfg.logdet_adv_disp_pgd_steps, 3)
+        cfg.logdet_adv_disp_swap_max_rounds = min(cfg.logdet_adv_disp_swap_max_rounds, 1)
         cfg.saal_candidate_pool_size = min(cfg.saal_candidate_pool_size, 512)
         if cfg.bait_candidate_pool_size is not None:
             cfg.bait_candidate_pool_size = min(cfg.bait_candidate_pool_size, 512)
@@ -551,8 +576,36 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         raise ValueError(
             f"logdet_adv_disp_percentile must be in [0, 1], got {cfg.logdet_adv_disp_percentile}"
         )
+    if cfg.logdet_adv_disp_swap_max_rounds < 0:
+        raise ValueError(
+            f"logdet_adv_disp_swap_max_rounds must be non-negative, got {cfg.logdet_adv_disp_swap_max_rounds}"
+        )
+    if cfg.logdet_adv_disp_swap_top_unselected < 0:
+        raise ValueError(
+            "logdet_adv_disp_swap_top_unselected must be non-negative "
+            f"(0 means all), got {cfg.logdet_adv_disp_swap_top_unselected}"
+        )
+    if cfg.logdet_adv_disp_swap_top_selected < 0:
+        raise ValueError(
+            "logdet_adv_disp_swap_top_selected must be non-negative "
+            f"(0 means all), got {cfg.logdet_adv_disp_swap_top_selected}"
+        )
+    if cfg.logdet_adv_disp_swap_improvement_tol < 0.0:
+        raise ValueError(
+            "logdet_adv_disp_swap_improvement_tol must be non-negative, "
+            f"got {cfg.logdet_adv_disp_swap_improvement_tol}"
+        )
+    if cfg.logdet_adv_disp_swap_downdate_tol <= 0.0:
+        raise ValueError(
+            "logdet_adv_disp_swap_downdate_tol must be positive, "
+            f"got {cfg.logdet_adv_disp_swap_downdate_tol}"
+        )
+    if cfg.logdet_adv_disp_swap_jitter <= 0.0:
+        raise ValueError(
+            f"logdet_adv_disp_swap_jitter must be positive, got {cfg.logdet_adv_disp_swap_jitter}"
+        )
     m = re.fullmatch(
-        r"(logdet_adv_disp|semantic_logdet|adv_displacement_logdet)_p(\d+)",
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?)_p(\d+)",
         cfg.acquisition_method.lower(),
     )
     if m is not None:

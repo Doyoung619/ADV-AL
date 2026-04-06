@@ -77,6 +77,19 @@ Implementation details:
   - `--acquisition_method logdet_adv_disp_p10` (equivalent to `logdet_adv_disp` + `--logdet-adv-disp-percentile 0.1`)
   - `--acquisition_method logdet_adv_disp_p25` (equivalent to `logdet_adv_disp` + `--logdet-adv-disp-percentile 0.25`)
 
+### `logdet_adv_disp_swap`
+- Keeps the same greedy stage as `logdet_adv_disp`.
+- Then applies 1-swap local search on cached displacement vectors only:
+  - remove one selected item and add one unselected item
+  - accept swap only if `logdet` objective improves above tolerance.
+- Swap hyperparameters:
+  - `--logdet-adv-disp-swap-max-rounds` (default `3`)
+  - `--logdet-adv-disp-swap-top-unselected` (default `200`, `0` means all)
+  - `--logdet-adv-disp-swap-top-selected` (default `0`, all selected candidates)
+  - `--logdet-adv-disp-swap-improvement-tol` (default `1e-8`)
+  - `--logdet-adv-disp-swap-downdate-tol` (default `1e-6`)
+  - `--logdet-adv-disp-swap-jitter` (default `1e-8`)
+
 ## Logging and Outputs
 
 Per round, logs include:
@@ -119,6 +132,11 @@ python main.py --acquisition_method logdet_adv_disp \
   --logdet-adv-disp-pgd-steps 10 \
   --logdet-adv-disp-pgd-step-size 0.0007843137 \
   --logdet-adv-disp-pgd-random-start
+python main.py --acquisition_method logdet_adv_disp_swap \
+  --logdet-adv-disp-attack fgsm \
+  --logdet-adv-disp-epsilon 0.0039215686 \
+  --logdet-adv-disp-lambda 1e-3 \
+  --logdet-adv-disp-swap-max-rounds 3
 ```
 
 Full sweep:

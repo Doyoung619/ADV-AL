@@ -29,11 +29,17 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "bait",
         "batchbald",
         "logdet_adv_disp",
+        "logdet_adv_disp_swap",
         "semantic_logdet",
+        "semantic_logdet_swap",
         "adv_displacement_logdet",
+        "adv_displacement_logdet_swap",
     }:
         return m, {}
-    mm_logdet = re.fullmatch(r"(logdet_adv_disp|semantic_logdet|adv_displacement_logdet)_p(\d+)", m)
+    mm_logdet = re.fullmatch(
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?)_p(\d+)",
+        m,
+    )
     if mm_logdet is not None:
         head = mm_logdet.group(1)
         pct = int(mm_logdet.group(2))

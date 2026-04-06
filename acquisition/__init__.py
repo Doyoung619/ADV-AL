@@ -19,7 +19,7 @@ from acquisition.saal import SAALStrategy
 from acquisition.saal_dual_b import SAALDualBStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
-from acquisition.logdet_adv_disp import LogDetAdvDispStrategy
+from acquisition.logdet_adv_disp import LogDetAdvDispStrategy, LogDetAdvDispSwapStrategy
 from acquisition.ours import OursGapStrategy, OursGradDispStrategy, OursHessianStrategy, OursStrategy
 from acquisition.pfilter import (
     BALDPercentileBALDStrategy,
@@ -28,9 +28,6 @@ from acquisition.pfilter import (
     EntropyPercentileRandomStrategy,
 )
 from acquisition.random_sampling import RandomStrategy
-
-# Temporary comment for remote push verification.
-
 
 METHOD_REGISTRY = {
     "random": RandomStrategy,
@@ -44,6 +41,9 @@ METHOD_REGISTRY = {
     "logdet_adv_disp": LogDetAdvDispStrategy,
     "semantic_logdet": LogDetAdvDispStrategy,
     "adv_displacement_logdet": LogDetAdvDispStrategy,
+    "logdet_adv_disp_swap": LogDetAdvDispSwapStrategy,
+    "semantic_logdet_swap": LogDetAdvDispSwapStrategy,
+    "adv_displacement_logdet_swap": LogDetAdvDispSwapStrategy,
     "badge": BADGEStrategy,
     "badge_dual_a": BADGEDualAStrategy,
     "badge_dual_b": BADGEDualBStrategy,
@@ -71,7 +71,10 @@ METHOD_REGISTRY = {
 
 def build_acquisition_strategy(name: str, cfg):
     name = name.lower()
-    m = re.fullmatch(r"(logdet_adv_disp|semantic_logdet|adv_displacement_logdet)_p(\d+)", name)
+    m = re.fullmatch(
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?)_p(\d+)",
+        name,
+    )
     if m is not None:
         pct = int(m.group(2))
         if pct < 0 or pct > 100:

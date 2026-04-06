@@ -8,8 +8,10 @@ from torch.utils.data import DataLoader, Dataset
 
 from acquisition.logdet_adv_disp import (
     LogDetAdvDispStrategy,
+    LogDetAdvDispSwapStrategy,
     compute_adv_displacement_embeddings,
     greedy_logdet_selector,
+    refine_logdet_swaps,
 )
 
 
@@ -50,6 +52,19 @@ def _assert_inverse_update_matches_direct(d: torch.Tensor, picked_local: np.ndar
         a_after = lam * eye + selected_tensor.t() @ selected_tensor
         a_after_inv = torch.linalg.inv(a_after)
         assert torch.allclose(a_inv, a_after_inv, atol=1e-5, rtol=1e-4), "Rank-1 inverse update mismatch."
+
+
+def _logdet_objective(d: torch.Tensor, selected_local: np.ndarray, lam: float) -> float:
+    c = int(d.size(1))
+    eye = torch.eye(c, dtype=d.dtype, device=d.device)
+    if len(selected_local) == 0:
+        a = lam * eye
+    else:
+        sel = torch.as_tensor(selected_local, dtype=torch.long, device=d.device)
+        a = lam * eye + d[sel].t() @ d[sel]
+    sign, logabsdet = torch.linalg.slogdet(a)
+    assert float(sign.item()) > 0.0, "Matrix must stay positive definite."
+    return float(logabsdet.item())
 
 
 def main():
@@ -120,7 +135,56 @@ def main():
     # Test 4: Sherman-Morrison rank-1 updates match direct inverse.
     _assert_inverse_update_matches_direct(d=disp_pgd.to(dtype=torch.float64), picked_local=picked_local, lam=lam)
 
-    # Test 5: End-to-end strategy API contract.
+    # Test 5: Swap refinement returns k unique and non-decreasing objective.
+    refined_local, swap_debug = refine_logdet_swaps(
+        displacements=disp_pgd,
+        selected_local=picked_local,
+        lambda_reg=lam,
+        score_chunk_size=4,
+        jitter=1e-8,
+        max_swap_rounds=3,
+        swap_top_unselected=8,
+        swap_top_selected=0,
+        swap_improvement_tol=1e-8,
+        swap_downdate_tol=1e-6,
+    )
+    assert len(refined_local) == 4, f"Expected 4 refined selections, got {len(refined_local)}"
+    assert len(np.unique(refined_local)) == 4, "Swap refinement produced duplicate indices."
+    obj_greedy = _logdet_objective(disp_pgd, picked_local, lam)
+    obj_refined = _logdet_objective(disp_pgd, refined_local, lam)
+    assert math.isfinite(obj_greedy) and math.isfinite(obj_refined), "Objectives must be finite."
+    assert obj_refined + 1e-7 >= obj_greedy, "Swap refinement objective must be non-decreasing."
+    assert int(swap_debug["accepted_swaps"]) >= 0, "accepted_swaps must be non-negative."
+
+    # Test 6: Tiny synthetic case with a known improving swap.
+    d_syn = torch.tensor(
+        [
+            [1.0, 0.0],
+            [0.99, 0.01],
+            [0.0, 1.0],
+            [-0.1, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    initial_syn = np.asarray([0, 1], dtype=np.int64)
+    refined_syn, syn_debug = refine_logdet_swaps(
+        displacements=d_syn,
+        selected_local=initial_syn,
+        lambda_reg=1e-3,
+        score_chunk_size=16,
+        jitter=1e-8,
+        max_swap_rounds=3,
+        swap_top_unselected=0,
+        swap_top_selected=0,
+        swap_improvement_tol=1e-10,
+        swap_downdate_tol=1e-8,
+    )
+    syn_obj_before = _logdet_objective(d_syn, initial_syn, 1e-3)
+    syn_obj_after = _logdet_objective(d_syn, refined_syn, 1e-3)
+    assert syn_obj_after > syn_obj_before + 1e-8, "Synthetic swap test should strictly improve objective."
+    assert int(syn_debug["accepted_swaps"]) >= 1, "Synthetic case should accept at least one swap."
+
+    # Test 7: End-to-end greedy strategy API contract.
     cfg = SimpleNamespace(
         logdet_adv_disp_attack="fgsm",
         logdet_adv_disp_attack_norm="linf",
@@ -131,10 +195,18 @@ def main():
         logdet_adv_disp_pgd_random_start=True,
         logdet_adv_disp_score_chunk_size=8,
         logdet_adv_disp_jitter=1e-8,
+        logdet_adv_disp_percentile=0.0,
+        logdet_adv_disp_swap_max_rounds=3,
+        logdet_adv_disp_swap_top_unselected=8,
+        logdet_adv_disp_swap_top_selected=0,
+        logdet_adv_disp_swap_improvement_tol=1e-8,
+        logdet_adv_disp_swap_downdate_tol=1e-6,
+        logdet_adv_disp_swap_jitter=1e-8,
         cifar10_mean=(0.0, 0.0, 0.0),
         cifar10_std=(1.0, 1.0, 1.0),
         pool_batch_size=4,
         debug_save_adv_scores=False,
+        acquisition_method="logdet_adv_disp",
     )
     strategy = LogDetAdvDispStrategy(cfg)
     out = strategy.select(
@@ -152,6 +224,24 @@ def main():
     assert math.isfinite(float(out.scoring_time_sec)), "Non-finite scoring time."
     assert math.isfinite(float(out.selection_time_sec)), "Non-finite selection time."
     assert out.scores is not None and out.scores.shape == (n,), "Expected first-step scores of shape [N]."
+
+    # Test 8: End-to-end swap strategy API contract.
+    cfg_swap = SimpleNamespace(**{**cfg.__dict__, "acquisition_method": "logdet_adv_disp_swap"})
+    strategy_swap = LogDetAdvDispSwapStrategy(cfg_swap)
+    out_swap = strategy_swap.select(
+        model=model,
+        unlabeled_loader=loader,
+        labeled_loader=None,
+        unlabeled_indices=np.arange(n, dtype=np.int64),
+        budget=4,
+        device=device,
+        progress_logger=None,
+    )
+    assert len(out_swap.selected_indices) == 4, "Swap strategy expected 4 selections."
+    assert len(np.unique(out_swap.selected_indices)) == 4, "Swap strategy selected duplicate indices."
+    assert float(out_swap.extras["swap_final_logdet_objective"]) + 1e-6 >= float(
+        out_swap.extras["swap_initial_logdet_objective"]
+    ), "Swap strategy objective should not decrease."
 
     print("LogDet adversarial displacement smoke tests passed.")
 

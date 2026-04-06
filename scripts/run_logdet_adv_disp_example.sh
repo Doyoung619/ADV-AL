@@ -30,3 +30,17 @@ python main.py \
 #   --logdet-adv-disp-lambda 1e-3 \
 #   --acquisition_size 50 \
 #   --num_rounds 20
+
+# Swap-refined variant (greedy + 1-swap local search):
+# python main.py \
+#   --dataset cifar10 \
+#   --model small_cnn \
+#   --acquisition_method logdet_adv_disp_swap \
+#   --logdet-adv-disp-attack fgsm \
+#   --logdet-adv-disp-epsilon 0.0039215686 \
+#   --logdet-adv-disp-lambda 1e-3 \
+#   --logdet-adv-disp-swap-max-rounds 3 \
+#   --logdet-adv-disp-swap-top-unselected 200 \
+#   --logdet-adv-disp-swap-top-selected 0 \
+#   --acquisition_size 50 \
+#   --num_rounds 20

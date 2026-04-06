@@ -1,6 +1,6 @@
 import math
 import time
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -239,6 +239,61 @@ def _quadratic_form_scores(
     return out
 
 
+def _logdet_spd(
+    matrix: torch.Tensor,
+    base_jitter: float = 1e-8,
+    max_tries: int = 6,
+) -> Tuple[float, float, bool]:
+    matrix = 0.5 * (matrix + matrix.t())
+    eye = torch.eye(matrix.size(0), dtype=matrix.dtype, device=matrix.device)
+    jitter = 0.0
+    for _ in range(max_tries):
+        try:
+            chol = torch.linalg.cholesky(matrix + jitter * eye)
+            logdet = float((2.0 * torch.log(torch.diag(chol))).sum().item())
+            return logdet, float(jitter), False
+        except RuntimeError:
+            jitter = float(base_jitter) if jitter == 0.0 else float(jitter * 10.0)
+
+    fallback_jitter = max(float(base_jitter), float(jitter))
+    sign, logabsdet = torch.linalg.slogdet(matrix + fallback_jitter * eye)
+    if float(sign.item()) <= 0.0:
+        return float("-inf"), float(fallback_jitter), True
+    return float(logabsdet.item()), float(fallback_jitter), True
+
+
+def _rebuild_selected_state(
+    displacements: torch.Tensor,
+    selected_local: torch.Tensor,
+    lambda_reg: float,
+    jitter: float,
+) -> Tuple[torch.Tensor, torch.Tensor, float, Dict[str, Any]]:
+    c = int(displacements.size(1))
+    eye = torch.eye(c, dtype=displacements.dtype, device=displacements.device)
+    if selected_local.numel() == 0:
+        selected_tensor = torch.empty((0, c), dtype=displacements.dtype, device=displacements.device)
+    else:
+        selected_tensor = displacements[selected_local]
+
+    a = float(lambda_reg) * eye + selected_tensor.t() @ selected_tensor
+    a_inv, inv_jitter, inv_used_pinv = _inverse_spd_with_jitter(
+        matrix=a,
+        base_jitter=float(jitter),
+        max_tries=6,
+    )
+    obj, logdet_jitter, logdet_fallback = _logdet_spd(
+        matrix=a,
+        base_jitter=float(jitter),
+        max_tries=6,
+    )
+    return a, a_inv, obj, {
+        "inv_jitter": float(inv_jitter),
+        "inv_used_pinv": bool(inv_used_pinv),
+        "logdet_jitter": float(logdet_jitter),
+        "logdet_fallback": bool(logdet_fallback),
+    }
+
+
 def greedy_logdet_selector(
     displacements: torch.Tensor,
     query_size: int,
@@ -347,6 +402,8 @@ def greedy_logdet_selector(
     return np.asarray(selected, dtype=np.int64), {
         "selected_scores": [float(x) for x in selected_scores],
         "selected_log_marginal_gains": [float(x) for x in selected_log_marginal_gains],
+        "initial_logdet_objective": float(c * math.log(float(lambda_reg))),
+        "final_logdet_objective": float(c * math.log(float(lambda_reg)) + float(np.sum(selected_log_marginal_gains))),
         "nonfinite_score_steps": int(nonfinite_score_steps),
         "inverse_rebuilds": int(inverse_rebuilds),
         "used_pinv_rebuilds": int(used_pinv_rebuilds),
@@ -354,7 +411,242 @@ def greedy_logdet_selector(
     }
 
 
+def refine_logdet_swaps(
+    displacements: torch.Tensor,
+    selected_local: np.ndarray,
+    lambda_reg: float = 1e-3,
+    score_chunk_size: int = 8192,
+    jitter: float = 1e-8,
+    max_swap_rounds: int = 3,
+    swap_top_unselected: int = 200,
+    swap_top_selected: int = 0,
+    swap_improvement_tol: float = 1e-8,
+    swap_downdate_tol: float = 1e-6,
+    progress_logger=None,
+    progress_method_name: str = "LOGDET_ADV_DISP_SWAP",
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    1-swap local refinement for:
+      F(S) = log det(lambda I + sum_{i in S} Delta_i Delta_i^T)
+
+    Starting from a greedy set S, repeatedly accept the best improving swap
+    (remove b in S, add u not in S) until convergence or max rounds.
+    """
+    if displacements.ndim != 2:
+        raise ValueError(f"displacements must be rank-2 [N,C], got shape={tuple(displacements.shape)}")
+    if float(lambda_reg) <= 0.0:
+        raise ValueError(f"lambda_reg must be positive, got {lambda_reg}")
+    if float(jitter) <= 0.0:
+        raise ValueError(f"jitter must be positive, got {jitter}")
+
+    d = displacements.to(dtype=torch.float32)
+    n = int(d.size(0))
+    selected = torch.as_tensor(selected_local, dtype=torch.long, device=d.device)
+    if selected.numel() == 0 or n == 0:
+        return np.asarray([], dtype=np.int64), {
+            "initial_logdet_objective": float("nan"),
+            "final_logdet_objective": float("nan"),
+            "accepted_swaps": 0,
+            "swap_rounds_run": 0,
+            "best_swap_gains_by_round": [],
+            "accepted_swap_gains": [],
+            "downdate_fallback_rebuilds": 0,
+            "downdate_skips": 0,
+            "state_rebuilds": 0,
+            "state_used_pinv_rebuilds": 0,
+            "max_jitter_used": 0.0,
+            "nonfinite_swap_score_events": 0,
+        }
+
+    selected = torch.unique(selected, sorted=False)
+    selected_mask = torch.zeros((n,), dtype=torch.bool, device=d.device)
+    selected_mask[selected] = True
+
+    _, a_inv, current_obj, init_state_debug = _rebuild_selected_state(
+        displacements=d,
+        selected_local=selected,
+        lambda_reg=float(lambda_reg),
+        jitter=float(jitter),
+    )
+    initial_obj = float(current_obj)
+
+    max_jitter_used = max(float(init_state_debug["inv_jitter"]), float(init_state_debug["logdet_jitter"]))
+    state_rebuilds = 1
+    state_used_pinv_rebuilds = int(init_state_debug["inv_used_pinv"])
+    nonfinite_swap_score_events = 0
+    downdate_fallback_rebuilds = 0
+    downdate_skips = 0
+    accepted_swaps = 0
+    best_swap_gains_by_round: List[float] = []
+    accepted_swap_gains: List[float] = []
+
+    rounds = max(0, int(max_swap_rounds))
+    for swap_round in range(rounds):
+        unselected = torch.nonzero(~selected_mask, as_tuple=False).squeeze(1)
+        if unselected.numel() == 0 or selected.numel() == 0:
+            break
+
+        # Candidate pruning: top-L unselected by current quadratic score.
+        if int(swap_top_unselected) > 0 and int(unselected.numel()) > int(swap_top_unselected):
+            unselected_scores = _quadratic_form_scores(d[unselected], a_inv, int(score_chunk_size))
+            unselected_scores = torch.where(
+                torch.isfinite(unselected_scores),
+                unselected_scores,
+                torch.full_like(unselected_scores, -torch.inf),
+            )
+            top_u = min(int(swap_top_unselected), int(unselected.numel()))
+            top_u_idx = torch.topk(unselected_scores, k=top_u, largest=True).indices
+            candidate_unselected = unselected[top_u_idx]
+        else:
+            candidate_unselected = unselected
+
+        # Candidate pruning: evaluate worst-L selected (small quadratic score) or all.
+        if int(swap_top_selected) > 0 and int(selected.numel()) > int(swap_top_selected):
+            selected_scores = _quadratic_form_scores(d[selected], a_inv, int(score_chunk_size))
+            selected_scores = torch.where(
+                torch.isfinite(selected_scores),
+                selected_scores,
+                torch.full_like(selected_scores, torch.inf),
+            )
+            top_b = min(int(swap_top_selected), int(selected.numel()))
+            worst_sel_idx = torch.topk(selected_scores, k=top_b, largest=False).indices
+            candidate_selected = selected[worst_sel_idx]
+        else:
+            candidate_selected = selected
+
+        d_unselected = d[candidate_unselected]
+        best_gain = float("-inf")
+        best_remove = None
+        best_add = None
+
+        selected_list = selected.tolist()
+        selected_pos = {int(idx): pos for pos, idx in enumerate(selected_list)}
+
+        for b_local in candidate_selected.tolist():
+            b_local = int(b_local)
+            u_b = d[b_local]
+            v_b = a_inv @ u_b
+            r_b = float(torch.dot(u_b, v_b).item())
+            one_minus = float(1.0 - r_b)
+
+            use_direct_fallback = (not math.isfinite(one_minus)) or (one_minus <= float(swap_downdate_tol))
+            if use_direct_fallback:
+                selected_wo = selected[selected != b_local]
+                if selected_wo.numel() == selected.numel():
+                    downdate_skips += 1
+                    continue
+                _, a_minus_inv, obj_minus, minus_debug = _rebuild_selected_state(
+                    displacements=d,
+                    selected_local=selected_wo,
+                    lambda_reg=float(lambda_reg),
+                    jitter=float(jitter),
+                )
+                downdate_fallback_rebuilds += 1
+                state_used_pinv_rebuilds += int(minus_debug["inv_used_pinv"])
+                max_jitter_used = max(
+                    max_jitter_used,
+                    float(minus_debug["inv_jitter"]),
+                    float(minus_debug["logdet_jitter"]),
+                )
+                removal_const = float(obj_minus - current_obj)
+            else:
+                a_minus_inv = a_inv + torch.outer(v_b, v_b) / one_minus
+                a_minus_inv = 0.5 * (a_minus_inv + a_minus_inv.t())
+                removal_const = float(math.log(one_minus))
+
+            q = _quadratic_form_scores(d_unselected, a_minus_inv, int(score_chunk_size))
+            finite_q = torch.isfinite(q)
+            if not bool(torch.all(finite_q)):
+                nonfinite_swap_score_events += 1
+            valid_q = finite_q & (q > (-1.0 + float(jitter)))
+            gains = torch.full_like(q, -torch.inf)
+            if bool(valid_q.any()):
+                gains[valid_q] = float(removal_const) + torch.log1p(q[valid_q])
+
+            local_best = int(torch.argmax(gains).item())
+            local_best_gain = float(gains[local_best].item())
+            if math.isfinite(local_best_gain) and local_best_gain > best_gain:
+                best_gain = local_best_gain
+                best_remove = b_local
+                best_add = int(candidate_unselected[local_best].item())
+
+        best_swap_gains_by_round.append(float(best_gain) if math.isfinite(best_gain) else float("-inf"))
+
+        if best_remove is None or best_add is None:
+            if progress_logger is not None:
+                progress_logger.log(
+                    f"[{progress_method_name}] round={swap_round + 1}/{rounds} no_valid_swap",
+                    device=str(d.device),
+                )
+            break
+
+        if best_gain <= float(swap_improvement_tol):
+            if progress_logger is not None:
+                progress_logger.log(
+                    (
+                        f"[{progress_method_name}] round={swap_round + 1}/{rounds} "
+                        f"best_gain={best_gain:.6e} <= tol={float(swap_improvement_tol):.6e} (stop)"
+                    ),
+                    device=str(d.device),
+                )
+            break
+
+        # Accept the best improving swap.
+        remove_pos = selected_pos[int(best_remove)]
+        selected_mask[int(best_remove)] = False
+        selected_mask[int(best_add)] = True
+        selected[remove_pos] = int(best_add)
+        accepted_swaps += 1
+        accepted_swap_gains.append(float(best_gain))
+
+        _, a_inv, current_obj, rebuild_debug = _rebuild_selected_state(
+            displacements=d,
+            selected_local=selected,
+            lambda_reg=float(lambda_reg),
+            jitter=float(jitter),
+        )
+        state_rebuilds += 1
+        state_used_pinv_rebuilds += int(rebuild_debug["inv_used_pinv"])
+        max_jitter_used = max(
+            max_jitter_used,
+            float(rebuild_debug["inv_jitter"]),
+            float(rebuild_debug["logdet_jitter"]),
+        )
+
+        if progress_logger is not None:
+            progress_logger.log(
+                (
+                    f"[{progress_method_name}] round={swap_round + 1}/{rounds} accepted "
+                    f"remove={best_remove} add={best_add} gain={best_gain:.6e} "
+                    f"objective={current_obj:.6f}"
+                ),
+                device=str(d.device),
+            )
+
+    return selected.detach().cpu().numpy().astype(np.int64), {
+        "initial_logdet_objective": float(initial_obj),
+        "final_logdet_objective": float(current_obj),
+        "accepted_swaps": int(accepted_swaps),
+        "swap_rounds_run": int(len(best_swap_gains_by_round)),
+        "best_swap_gains_by_round": [float(x) for x in best_swap_gains_by_round],
+        "accepted_swap_gains": [float(x) for x in accepted_swap_gains],
+        "downdate_fallback_rebuilds": int(downdate_fallback_rebuilds),
+        "downdate_skips": int(downdate_skips),
+        "state_rebuilds": int(state_rebuilds),
+        "state_used_pinv_rebuilds": int(state_used_pinv_rebuilds),
+        "max_jitter_used": float(max_jitter_used),
+        "nonfinite_swap_score_events": int(nonfinite_swap_score_events),
+        "swap_top_unselected": int(swap_top_unselected),
+        "swap_top_selected": int(swap_top_selected),
+        "swap_improvement_tol": float(swap_improvement_tol),
+        "swap_downdate_tol": float(swap_downdate_tol),
+    }
+
+
 class LogDetAdvDispStrategy(BaseAcquisition):
+    method_name: str = "logdet_adv_disp"
+    enable_swap_refinement: bool = False
+
     def select(
         self,
         model,
@@ -391,7 +683,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             first_step_scores_all = torch.empty((0,), dtype=torch.float32, device=device)
             disp_norm_sq_all = first_step_scores_all
 
-        percentile = float(self.cfg.logdet_adv_disp_percentile)
+        percentile = float(getattr(self.cfg, "logdet_adv_disp_percentile", 0.0))
         if displacements.numel() > 0 and percentile > 0.0:
             threshold = torch.quantile(first_step_scores_all, q=percentile)
             feasible_mask = first_step_scores_all >= threshold
@@ -416,7 +708,29 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             progress_logger=progress_logger,
             progress_method_name="LOGDET_ADV_DISP_GREEDY",
         )
-        selection_time = time.perf_counter() - t_sel
+        greedy_selection_time = time.perf_counter() - t_sel
+
+        swap_debug: Dict[str, Any] = {}
+        if bool(self.enable_swap_refinement):
+            t_swap = time.perf_counter()
+            picked_local, swap_debug = refine_logdet_swaps(
+                displacements=displacements_sel,
+                selected_local=picked_local,
+                lambda_reg=float(self.cfg.logdet_adv_disp_lambda),
+                score_chunk_size=int(self.cfg.logdet_adv_disp_score_chunk_size),
+                jitter=float(getattr(self.cfg, "logdet_adv_disp_swap_jitter", self.cfg.logdet_adv_disp_jitter)),
+                max_swap_rounds=int(getattr(self.cfg, "logdet_adv_disp_swap_max_rounds", 3)),
+                swap_top_unselected=int(getattr(self.cfg, "logdet_adv_disp_swap_top_unselected", 200)),
+                swap_top_selected=int(getattr(self.cfg, "logdet_adv_disp_swap_top_selected", 0)),
+                swap_improvement_tol=float(getattr(self.cfg, "logdet_adv_disp_swap_improvement_tol", 1e-8)),
+                swap_downdate_tol=float(getattr(self.cfg, "logdet_adv_disp_swap_downdate_tol", 1e-6)),
+                progress_logger=progress_logger,
+                progress_method_name="LOGDET_ADV_DISP_SWAP",
+            )
+            swap_time = time.perf_counter() - t_swap
+        else:
+            swap_time = 0.0
+        selection_time = float(greedy_selection_time + swap_time)
 
         picked_local_t = torch.as_tensor(picked_local, device=feasible_local.device, dtype=torch.long)
         picked_local_global = feasible_local[picked_local_t].detach().cpu().numpy()
@@ -470,6 +784,19 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 ),
                 device=str(device),
             )
+            if bool(self.enable_swap_refinement):
+                progress_logger.log(
+                    (
+                        "[LOGDET_ADV_DISP] swap_stats "
+                        f"accepted={int(swap_debug.get('accepted_swaps', 0))} "
+                        f"rounds={int(swap_debug.get('swap_rounds_run', 0))} "
+                        f"obj_greedy={float(select_debug.get('final_logdet_objective', float('nan'))):.6f} "
+                        f"obj_refined={float(swap_debug.get('final_logdet_objective', float('nan'))):.6f}"
+                    ),
+                    device=str(device),
+                )
+
+        method_name = str(getattr(self.cfg, "acquisition_method", self.method_name)).lower()
 
         return AcquisitionOutput(
             selected_indices=selected,
@@ -477,7 +804,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             scoring_time_sec=float(scoring_time),
             selection_time_sec=float(selection_time),
             extras={
-                "method": "logdet_adv_disp",
+                "method": method_name,
                 "embedding": "logits",
                 "objective": "logdet_lambdaI_plus_sum_adv_displacements",
                 "attack_type": self.cfg.logdet_adv_disp_attack,
@@ -500,10 +827,49 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 "selected_mean_greedy_score": selected_mean_score,
                 "selected_scores": select_debug["selected_scores"],
                 "selected_log_marginal_gains": select_debug["selected_log_marginal_gains"],
+                "greedy_initial_logdet_objective": float(select_debug.get("initial_logdet_objective", float("nan"))),
+                "greedy_final_logdet_objective": float(select_debug.get("final_logdet_objective", float("nan"))),
                 "nonfinite_score_steps": int(select_debug["nonfinite_score_steps"]),
                 "inverse_rebuilds": int(select_debug["inverse_rebuilds"]),
                 "used_pinv_rebuilds": int(select_debug["used_pinv_rebuilds"]),
                 "max_jitter_used": float(select_debug["max_jitter_used"]),
+                "swap_refinement_enabled": bool(self.enable_swap_refinement),
+                "swap_time_sec": float(swap_time),
+                "swap_initial_logdet_objective": float(
+                    swap_debug.get("initial_logdet_objective", select_debug.get("final_logdet_objective", float("nan")))
+                ),
+                "swap_final_logdet_objective": float(
+                    swap_debug.get("final_logdet_objective", select_debug.get("final_logdet_objective", float("nan")))
+                ),
+                "swap_accepted_swaps": int(swap_debug.get("accepted_swaps", 0)),
+                "swap_rounds_run": int(swap_debug.get("swap_rounds_run", 0)),
+                "swap_best_gains_by_round": swap_debug.get("best_swap_gains_by_round", []),
+                "swap_accepted_gains": swap_debug.get("accepted_swap_gains", []),
+                "swap_downdate_fallback_rebuilds": int(swap_debug.get("downdate_fallback_rebuilds", 0)),
+                "swap_downdate_skips": int(swap_debug.get("downdate_skips", 0)),
+                "swap_state_rebuilds": int(swap_debug.get("state_rebuilds", 0)),
+                "swap_state_used_pinv_rebuilds": int(swap_debug.get("state_used_pinv_rebuilds", 0)),
+                "swap_nonfinite_swap_score_events": int(swap_debug.get("nonfinite_swap_score_events", 0)),
+                "swap_max_jitter_used": float(swap_debug.get("max_jitter_used", 0.0)),
+                "swap_top_unselected": int(swap_debug.get("swap_top_unselected", 0)),
+                "swap_top_selected": int(swap_debug.get("swap_top_selected", 0)),
+                "swap_improvement_tol": float(
+                    swap_debug.get(
+                        "swap_improvement_tol",
+                        float(getattr(self.cfg, "logdet_adv_disp_swap_improvement_tol", 1e-8)),
+                    )
+                ),
+                "swap_downdate_tol": float(
+                    swap_debug.get(
+                        "swap_downdate_tol",
+                        float(getattr(self.cfg, "logdet_adv_disp_swap_downdate_tol", 1e-6)),
+                    )
+                ),
             },
             debug_data=debug_data,
         )
+
+
+class LogDetAdvDispSwapStrategy(LogDetAdvDispStrategy):
+    method_name: str = "logdet_adv_disp_swap"
+    enable_swap_refinement: bool = True
