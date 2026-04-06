@@ -114,7 +114,13 @@ def train_model_for_round(
     optimizer = create_optimizer(model, cfg)
     scheduler = create_scheduler(optimizer, cfg)
     amp_enabled = bool(cfg.amp and device.type == "cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    scaler = None
+    if amp_enabled:
+        # Prefer modern API when available; fall back for older Torch builds.
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            scaler = torch.amp.GradScaler("cuda", enabled=True)
+        else:
+            scaler = torch.cuda.amp.GradScaler(enabled=True)
 
     best_metric = -1.0
     best_state = None

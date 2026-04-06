@@ -1,3 +1,5 @@
+import re
+
 from acquisition.bait import BAITStrategy
 from acquisition.badge import BADGEStrategy
 from acquisition.badge_dual_a import BADGEDualAStrategy
@@ -69,6 +71,14 @@ METHOD_REGISTRY = {
 
 def build_acquisition_strategy(name: str, cfg):
     name = name.lower()
+    m = re.fullmatch(r"(logdet_adv_disp|semantic_logdet|adv_displacement_logdet)_p(\d+)", name)
+    if m is not None:
+        pct = int(m.group(2))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Unsupported acquisition method percentile suffix: {name}")
+        if hasattr(cfg, "logdet_adv_disp_percentile"):
+            cfg.logdet_adv_disp_percentile = float(pct) / 100.0
+        name = m.group(1)
     if name not in METHOD_REGISTRY:
         raise ValueError(f"Unsupported acquisition method: {name}")
     return METHOD_REGISTRY[name](cfg)

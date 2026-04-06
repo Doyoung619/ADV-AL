@@ -73,6 +73,9 @@ Implementation details:
   - `--logdet-adv-disp-pgd-steps 5`
   - `--logdet-adv-disp-pgd-step-size None` (auto = `epsilon / max(steps/2, 1)`)
   - `--logdet-adv-disp-pgd-random-start`
+- Percentile variants (same style as `ours_*_p10`):
+  - `--acquisition_method logdet_adv_disp_p10` (equivalent to `logdet_adv_disp` + `--logdet-adv-disp-percentile 0.1`)
+  - `--acquisition_method logdet_adv_disp_p25` (equivalent to `logdet_adv_disp` + `--logdet-adv-disp-percentile 0.25`)
 
 ## Logging and Outputs
 

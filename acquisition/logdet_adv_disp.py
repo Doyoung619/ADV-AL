@@ -384,9 +384,31 @@ class LogDetAdvDispStrategy(BaseAcquisition):
         )
         scoring_time = time.perf_counter() - t0
 
+        if displacements.numel() > 0:
+            first_step_scores_all = displacements.pow(2).sum(dim=1) / float(self.cfg.logdet_adv_disp_lambda)
+            disp_norm_sq_all = displacements.pow(2).sum(dim=1)
+        else:
+            first_step_scores_all = torch.empty((0,), dtype=torch.float32, device=device)
+            disp_norm_sq_all = first_step_scores_all
+
+        percentile = float(self.cfg.logdet_adv_disp_percentile)
+        if displacements.numel() > 0 and percentile > 0.0:
+            threshold = torch.quantile(first_step_scores_all, q=percentile)
+            feasible_mask = first_step_scores_all >= threshold
+        else:
+            threshold = torch.tensor(float("-inf"), device=device, dtype=torch.float32)
+            feasible_mask = torch.ones_like(first_step_scores_all, dtype=torch.bool)
+
+        feasible_local = torch.nonzero(feasible_mask, as_tuple=False).squeeze(1)
+        if feasible_local.numel() == 0:
+            feasible_local = torch.arange(displacements.size(0), device=displacements.device, dtype=torch.long)
+            feasible_mask = torch.ones_like(first_step_scores_all, dtype=torch.bool)
+
+        displacements_sel = displacements[feasible_local]
+
         t_sel = time.perf_counter()
         picked_local, select_debug = greedy_logdet_selector(
-            displacements=displacements,
+            displacements=displacements_sel,
             query_size=budget,
             lambda_reg=self.cfg.logdet_adv_disp_lambda,
             score_chunk_size=self.cfg.logdet_adv_disp_score_chunk_size,
@@ -396,38 +418,36 @@ class LogDetAdvDispStrategy(BaseAcquisition):
         )
         selection_time = time.perf_counter() - t_sel
 
-        selected = unlabeled_indices[picked_local]
+        picked_local_t = torch.as_tensor(picked_local, device=feasible_local.device, dtype=torch.long)
+        picked_local_global = feasible_local[picked_local_t].detach().cpu().numpy()
+        selected = unlabeled_indices[picked_local_global]
 
-        if displacements.numel() > 0:
-            first_step_scores = displacements.pow(2).sum(dim=1) / float(self.cfg.logdet_adv_disp_lambda)
-            disp_norm_sq = displacements.pow(2).sum(dim=1)
-            disp_norm_sq_stats = tensor_stats(disp_norm_sq)
-            first_step_score_stats = tensor_stats(first_step_scores)
-        else:
-            first_step_scores = torch.empty((0,), dtype=torch.float32, device=device)
-            disp_norm_sq = first_step_scores
-            disp_norm_sq_stats = tensor_stats(disp_norm_sq)
-            first_step_score_stats = tensor_stats(first_step_scores)
+        first_step_scores = first_step_scores_all
+        disp_norm_sq = disp_norm_sq_all
+        disp_norm_sq_stats = tensor_stats(disp_norm_sq)
+        first_step_score_stats = tensor_stats(first_step_scores)
 
-        k = len(picked_local)
+        k = len(picked_local_global)
         selected_scores = select_debug["selected_scores"]
         selected_mean_score = float(np.mean(selected_scores)) if k > 0 else float("nan")
 
         debug_data = None
         if bool(getattr(self.cfg, "debug_save_adv_scores", False)):
             selected_flag = np.zeros(len(unlabeled_indices), dtype=np.int64)
-            selected_flag[picked_local] = 1
+            selected_flag[picked_local_global] = 1
             debug_data = {
                 "__file_tag": "logdet_adv_disp_scores",
                 "__column_order": [
                     "index",
                     "disp_norm_sq",
                     "first_step_score",
+                    "feasible_flag",
                     "selected_flag",
                 ],
                 "index": np.asarray(unlabeled_indices, dtype=np.int64),
                 "disp_norm_sq": disp_norm_sq.detach().cpu().numpy(),
                 "first_step_score": first_step_scores.detach().cpu().numpy(),
+                "feasible_flag": feasible_mask.detach().cpu().numpy().astype(np.int64),
                 "selected_flag": selected_flag,
             }
 
@@ -444,6 +464,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 (
                     "[LOGDET_ADV_DISP] greedy_stats "
                     f"selected_mean_score={selected_mean_score:.6f} "
+                    f"percentile={percentile:.3f} feasible={int(feasible_local.numel())}/{int(len(unlabeled_indices))} "
                     f"rebuilds={select_debug['inverse_rebuilds']} "
                     f"nonfinite_steps={select_debug['nonfinite_score_steps']}"
                 ),
@@ -468,6 +489,9 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 "pgd_random_start": bool(self.cfg.logdet_adv_disp_pgd_random_start),
                 "score_chunk_size": int(self.cfg.logdet_adv_disp_score_chunk_size),
                 "jitter": float(self.cfg.logdet_adv_disp_jitter),
+                "percentile": float(percentile),
+                "percentile_threshold": float(threshold.item()) if torch.isfinite(threshold) else float("-inf"),
+                "feasible_size": int(feasible_local.numel()),
                 "pool_size": int(len(unlabeled_indices)),
                 "selected_size": int(len(selected)),
                 "selected_indices": selected.astype(np.int64).tolist(),

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
@@ -65,6 +66,7 @@ class Config:
     logdet_adv_disp_pgd_random_start: bool = True
     logdet_adv_disp_score_chunk_size: int = 8192
     logdet_adv_disp_jitter: float = 1e-8
+    logdet_adv_disp_percentile: float = 0.0
     ours_delta_objective: str = "logit_mismatch"
     ours_hessian_lambda: float = 1e-3
     ours_gap_use_fixed_clean_classes: bool = True
@@ -265,6 +267,9 @@ def build_parser() -> argparse.ArgumentParser:
             "ours_gap",
             "ours_grad_disp",
             "logdet_adv_disp",
+            "logdet_adv_disp_p10",
+            "logdet_adv_disp_p20",
+            "logdet_adv_disp_p25",
             "semantic_logdet",
             "adv_displacement_logdet",
         ],
@@ -296,6 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(logdet_adv_disp_pgd_random_start=True)
     parser.add_argument("--logdet-adv-disp-score-chunk-size", type=int, default=8192)
     parser.add_argument("--logdet-adv-disp-jitter", type=float, default=1e-8)
+    parser.add_argument("--logdet-adv-disp-percentile", type=float, default=0.0)
     parser.add_argument(
         "--ours-delta-objective",
         type=str,
@@ -541,6 +547,20 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         )
     if cfg.logdet_adv_disp_jitter <= 0.0:
         raise ValueError(f"logdet_adv_disp_jitter must be positive, got {cfg.logdet_adv_disp_jitter}")
+    if not (0.0 <= cfg.logdet_adv_disp_percentile <= 1.0):
+        raise ValueError(
+            f"logdet_adv_disp_percentile must be in [0, 1], got {cfg.logdet_adv_disp_percentile}"
+        )
+    m = re.fullmatch(
+        r"(logdet_adv_disp|semantic_logdet|adv_displacement_logdet)_p(\d+)",
+        cfg.acquisition_method.lower(),
+    )
+    if m is not None:
+        pct = int(m.group(2))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid acquisition_method percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = m.group(1)
+        cfg.logdet_adv_disp_percentile = float(pct) / 100.0
     if cfg.methods is not None:
         cfg.methods = [m.strip().lower() for m in cfg.methods.split(",") if m.strip()]
     cfg = apply_mode_overrides(cfg)

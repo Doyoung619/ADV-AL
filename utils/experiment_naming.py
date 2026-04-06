@@ -33,6 +33,14 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "adv_displacement_logdet",
     }:
         return m, {}
+    mm_logdet = re.fullmatch(r"(logdet_adv_disp|semantic_logdet|adv_displacement_logdet)_p(\d+)", m)
+    if mm_logdet is not None:
+        head = mm_logdet.group(1)
+        pct = int(mm_logdet.group(2))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid percentile in method name: {method_name}")
+        percentile = f"{pct / 100.0:.4f}".rstrip("0").rstrip(".")
+        return head, {"logdet_adv_disp_percentile": percentile}
     if m == "ours_l2":
         return "ours", {}
 
