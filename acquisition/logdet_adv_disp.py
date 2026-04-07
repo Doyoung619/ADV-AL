@@ -1,6 +1,6 @@
 import math
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -94,7 +94,8 @@ def compute_adv_displacement_embeddings(
     progress_logger=None,
     progress_method_name: str = "LOGDET_ADV_DISP",
     tensor_batch_size: Optional[int] = None,
-) -> torch.Tensor:
+    return_clean_logits: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Compute adversarial semantic displacement vectors:
       Delta(x) = z(x_adv) - z(x)
@@ -122,6 +123,7 @@ def compute_adv_displacement_embeddings(
     model.eval()
 
     displacements = []
+    clean_logits_all = [] if bool(return_clean_logits) else None
     t0 = time.perf_counter()
 
     for batch_idx, (batch_images, total_batches) in enumerate(
@@ -144,6 +146,8 @@ def compute_adv_displacement_embeddings(
 
         with torch.no_grad():
             clean_logits = model(x0).detach()
+            if clean_logits_all is not None:
+                clean_logits_all.append(clean_logits.to(dtype=torch.float32))
 
         if attack_type == "fgsm":
             x_adv = _fgsm_logit_displacement_attack(
@@ -198,8 +202,14 @@ def compute_adv_displacement_embeddings(
         model.train()
 
     if len(displacements) == 0:
-        return torch.empty((0, 0), dtype=torch.float32, device=device)
-    return torch.cat(displacements, dim=0)
+        empty = torch.empty((0, 0), dtype=torch.float32, device=device)
+        if clean_logits_all is not None:
+            return empty, empty
+        return empty
+    disp_cat = torch.cat(displacements, dim=0)
+    if clean_logits_all is not None:
+        return disp_cat, torch.cat(clean_logits_all, dim=0)
+    return disp_cat
 
 
 def _inverse_spd_with_jitter(
@@ -658,7 +668,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
         progress_logger=None,
     ) -> AcquisitionOutput:
         t0 = time.perf_counter()
-        displacements = compute_adv_displacement_embeddings(
+        displacements, clean_logits_all = compute_adv_displacement_embeddings(
             model=model,
             unlabeled_loader=unlabeled_loader,
             attack_type=self.cfg.logdet_adv_disp_attack,
@@ -673,20 +683,24 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             progress_logger=progress_logger,
             progress_method_name="LOGDET_ADV_DISP_ATTACK",
             tensor_batch_size=self.cfg.pool_batch_size,
+            return_clean_logits=True,
         )
         scoring_time = time.perf_counter() - t0
 
         if displacements.numel() > 0:
             first_step_scores_all = displacements.pow(2).sum(dim=1) / float(self.cfg.logdet_adv_disp_lambda)
             disp_norm_sq_all = displacements.pow(2).sum(dim=1)
+            probs = torch.softmax(clean_logits_all, dim=1)
+            entropy_scores_all = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
         else:
             first_step_scores_all = torch.empty((0,), dtype=torch.float32, device=device)
             disp_norm_sq_all = first_step_scores_all
+            entropy_scores_all = first_step_scores_all
 
         percentile = float(getattr(self.cfg, "logdet_adv_disp_percentile", 0.0))
         if displacements.numel() > 0 and percentile > 0.0:
-            threshold = torch.quantile(first_step_scores_all, q=percentile)
-            feasible_mask = first_step_scores_all >= threshold
+            threshold = torch.quantile(entropy_scores_all, q=percentile)
+            feasible_mask = entropy_scores_all >= threshold
         else:
             threshold = torch.tensor(float("-inf"), device=device, dtype=torch.float32)
             feasible_mask = torch.ones_like(first_step_scores_all, dtype=torch.bool)
@@ -737,9 +751,11 @@ class LogDetAdvDispStrategy(BaseAcquisition):
         selected = unlabeled_indices[picked_local_global]
 
         first_step_scores = first_step_scores_all
+        entropy_scores = entropy_scores_all
         disp_norm_sq = disp_norm_sq_all
         disp_norm_sq_stats = tensor_stats(disp_norm_sq)
         first_step_score_stats = tensor_stats(first_step_scores)
+        entropy_score_stats = tensor_stats(entropy_scores)
 
         k = len(picked_local_global)
         selected_scores = select_debug["selected_scores"]
@@ -755,12 +771,14 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                     "index",
                     "disp_norm_sq",
                     "first_step_score",
+                    "entropy_score",
                     "feasible_flag",
                     "selected_flag",
                 ],
                 "index": np.asarray(unlabeled_indices, dtype=np.int64),
                 "disp_norm_sq": disp_norm_sq.detach().cpu().numpy(),
                 "first_step_score": first_step_scores.detach().cpu().numpy(),
+                "entropy_score": entropy_scores.detach().cpu().numpy(),
                 "feasible_flag": feasible_mask.detach().cpu().numpy().astype(np.int64),
                 "selected_flag": selected_flag,
             }
@@ -779,6 +797,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                     "[LOGDET_ADV_DISP] greedy_stats "
                     f"selected_mean_score={selected_mean_score:.6f} "
                     f"percentile={percentile:.3f} feasible={int(feasible_local.numel())}/{int(len(unlabeled_indices))} "
+                    f"percentile_basis=entropy "
                     f"rebuilds={select_debug['inverse_rebuilds']} "
                     f"nonfinite_steps={select_debug['nonfinite_score_steps']}"
                 ),
@@ -817,6 +836,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 "score_chunk_size": int(self.cfg.logdet_adv_disp_score_chunk_size),
                 "jitter": float(self.cfg.logdet_adv_disp_jitter),
                 "percentile": float(percentile),
+                "percentile_basis": "entropy",
                 "percentile_threshold": float(threshold.item()) if torch.isfinite(threshold) else float("-inf"),
                 "feasible_size": int(feasible_local.numel()),
                 "pool_size": int(len(unlabeled_indices)),
@@ -824,6 +844,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 "selected_indices": selected.astype(np.int64).tolist(),
                 "disp_norm_sq_stats": disp_norm_sq_stats,
                 "first_step_score_stats": first_step_score_stats,
+                "entropy_score_stats": entropy_score_stats,
                 "selected_mean_greedy_score": selected_mean_score,
                 "selected_scores": select_debug["selected_scores"],
                 "selected_log_marginal_gains": select_debug["selected_log_marginal_gains"],

@@ -76,6 +76,7 @@ Implementation details:
 - Percentile variants (same style as `ours_*_p10`):
   - `--acquisition_method logdet_adv_disp_p10` (equivalent to `logdet_adv_disp` + `--logdet-adv-disp-percentile 0.1`)
   - `--acquisition_method logdet_adv_disp_p25` (equivalent to `logdet_adv_disp` + `--logdet-adv-disp-percentile 0.25`)
+  - percentile filtering basis: clean predictive entropy (low-entropy tail removed).
 
 ### `logdet_adv_disp_swap`
 - Keeps the same greedy stage as `logdet_adv_disp`.
