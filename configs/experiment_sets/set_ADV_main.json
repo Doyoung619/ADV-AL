@@ -35,7 +35,7 @@
     "train_mode": "adv",
     "adv_train_attack": "pgd",
     "adv_train_epsilon": 0.00392156862745098,
-    "adv_train_steps": 5
+    "adv_train_steps": 3
   },
   "description": "Robust-training counterpart of set_A_main (CIFAR10 only)."
 }

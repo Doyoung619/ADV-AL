@@ -50,7 +50,7 @@ class Config:
     train_mode: str = "clean"
     adv_train_attack: str = "pgd"
     adv_train_epsilon: Optional[float] = None
-    adv_train_steps: int = 5
+    adv_train_steps: int = 3
     adv_train_step_size: Optional[float] = None
     adv_train_random_start: bool = True
 
@@ -61,13 +61,13 @@ class Config:
     epsilon: float = 8.0 / 255.0
     attack_norm: str = "linf"
     acquisition_attack: str = "pgd"
-    acquisition_pgd_steps: int = 5
+    acquisition_pgd_steps: int = 3
     acquisition_pgd_alpha: float = 2.0 / 255.0
     logdet_adv_disp_attack: str = "fgsm"
     logdet_adv_disp_attack_norm: str = "linf"
     logdet_adv_disp_epsilon: float = 1.0 / 255.0
     logdet_adv_disp_lambda: float = 1e-3
-    logdet_adv_disp_pgd_steps: int = 5
+    logdet_adv_disp_pgd_steps: int = 3
     logdet_adv_disp_pgd_step_size: Optional[float] = None
     logdet_adv_disp_pgd_random_start: bool = True
     logdet_adv_disp_score_chunk_size: int = 8192
@@ -82,7 +82,7 @@ class Config:
     ours_delta_objective: str = "logit_mismatch"
     ours_hessian_lambda: float = 1e-3
     ours_gap_use_fixed_clean_classes: bool = True
-    eval_pgd_steps: int = 10
+    eval_pgd_steps: int = 3
     eval_pgd_alpha: float = 2.0 / 255.0
     skip_pgd_eval: bool = False
     skip_logit_mismatch_eval: bool = False
@@ -242,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-mode", choices=["clean", "adv"], default="clean")
     parser.add_argument("--adv-train-attack", choices=["fgsm", "pgd"], default="pgd")
     parser.add_argument("--adv-train-epsilon", type=_parse_optional_float, default=None)
-    parser.add_argument("--adv-train-steps", type=int, default=5)
+    parser.add_argument("--adv-train-steps", type=int, default=3)
     parser.add_argument("--adv-train-step-size", type=_parse_optional_float, default=None)
     parser.add_argument("--adv-train-random-start", action="store_true")
     parser.add_argument("--no-adv-train-random-start", dest="adv_train_random_start", action="store_false")
@@ -318,13 +318,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epsilon", type=float, default=8.0 / 255.0)
     parser.add_argument("--attack-norm", type=str, default="linf")
     parser.add_argument("--acquisition-attack", choices=["fgsm", "pgd"], default="pgd")
-    parser.add_argument("--acquisition-pgd-steps", type=int, default=5)
+    parser.add_argument("--acquisition-pgd-steps", type=int, default=3)
     parser.add_argument("--acquisition-pgd-alpha", type=float, default=2.0 / 255.0)
     parser.add_argument("--logdet-adv-disp-attack", choices=["fgsm", "pgd"], default="fgsm")
     parser.add_argument("--logdet-adv-disp-attack-norm", choices=["linf"], default="linf")
     parser.add_argument("--logdet-adv-disp-epsilon", type=float, default=1.0 / 255.0)
     parser.add_argument("--logdet-adv-disp-lambda", type=float, default=1e-3)
-    parser.add_argument("--logdet-adv-disp-pgd-steps", type=int, default=5)
+    parser.add_argument("--logdet-adv-disp-pgd-steps", type=int, default=3)
     parser.add_argument(
         "--logdet-adv-disp-pgd-step-size",
         type=_parse_optional_float,
@@ -356,7 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ours-gap-use-fixed-clean-classes", action="store_true")
     parser.add_argument("--no-ours-gap-use-fixed-clean-classes", dest="ours_gap_use_fixed_clean_classes", action="store_false")
     parser.set_defaults(ours_gap_use_fixed_clean_classes=True)
-    parser.add_argument("--eval-pgd-steps", type=int, default=10)
+    parser.add_argument("--eval-pgd-steps", type=int, default=3)
     parser.add_argument("--eval-pgd-alpha", type=float, default=2.0 / 255.0)
     parser.add_argument("--skip-pgd-eval", action="store_true")
     parser.add_argument("--skip-logit-mismatch-eval", action="store_true")

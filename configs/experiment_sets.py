@@ -80,7 +80,7 @@ EXPERIMENT_SET_DEFINITIONS: Dict[str, Dict] = {
             "train_mode": "adv",
             "adv_train_attack": "pgd",
             "adv_train_epsilon": 1.0 / 255.0,
-            "adv_train_steps": 5,
+            "adv_train_steps": 3,
         },
         "description": "Robust-training counterpart of set_A_main (CIFAR10 only).",
     },
