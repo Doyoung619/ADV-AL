@@ -36,10 +36,13 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "adv_displacement_logdet_swap",
         "logdet_adv_feat_swap",
         "logdet_adv_logit_swap",
+        "logit_adv_disp_swap",
+        "logit_adv_feat_swap",
+        "logit_adv_logit_swap",
     }:
         return m, {}
     mm_logdet = re.fullmatch(
-        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logit_adv_disp_swap|logdet_adv_feat_swap|logdet_adv_logit_swap|logit_adv_feat_swap|logit_adv_logit_swap)_p(\d+)",
         m,
     )
     if mm_logdet is not None:

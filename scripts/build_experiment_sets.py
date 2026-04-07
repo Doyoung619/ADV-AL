@@ -40,6 +40,7 @@ def expand_set_specs(set_name: str, set_def: Dict) -> List[Dict]:
                     "rounds": int(set_def["rounds"]),
                     "epochs_per_round": int(set_def["epochs_per_round"]),
                     "eval_epsilon": float(set_def["eval_epsilon"]),
+                    "extra_cli_args": dict(set_def.get("extra_cli_args", {})),
                 }
 
                 variants = [base]
@@ -142,6 +143,14 @@ def build_command(
         cmd.append("--skip-logit-mismatch-eval")
     for k, v in sorted(extra.items()):
         cmd.extend([f"--{k.replace('_', '-')}", str(v)])
+    for k, v in sorted(spec.get("extra_cli_args", {}).items()):
+        flag = f"--{k.replace('_', '-')}"
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            cmd.append(flag if v else f"--no-{k.replace('_', '-')}")
+        else:
+            cmd.extend([flag, str(v)])
     return " ".join(cmd) + f" > {log_path} 2>&1"
 
 

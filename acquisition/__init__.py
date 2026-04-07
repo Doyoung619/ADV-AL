@@ -47,10 +47,13 @@ METHOD_REGISTRY = {
     "semantic_logdet": LogDetAdvDispStrategy,
     "adv_displacement_logdet": LogDetAdvDispStrategy,
     "logdet_adv_disp_swap": LogDetAdvDispSwapStrategy,
+    "logit_adv_disp_swap": LogDetAdvDispSwapStrategy,
     "semantic_logdet_swap": LogDetAdvDispSwapStrategy,
     "adv_displacement_logdet_swap": LogDetAdvDispSwapStrategy,
     "logdet_adv_feat_swap": LogDetAdvFeatSwapStrategy,
+    "logit_adv_feat_swap": LogDetAdvFeatSwapStrategy,
     "logdet_adv_logit_swap": LogDetAdvLogitSwapStrategy,
+    "logit_adv_logit_swap": LogDetAdvLogitSwapStrategy,
     "badge": BADGEStrategy,
     "badge_dual_a": BADGEDualAStrategy,
     "badge_dual_b": BADGEDualBStrategy,
@@ -79,7 +82,7 @@ METHOD_REGISTRY = {
 def build_acquisition_strategy(name: str, cfg):
     name = name.lower()
     m = re.fullmatch(
-        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logit_adv_disp_swap|logdet_adv_feat_swap|logdet_adv_logit_swap|logit_adv_feat_swap|logit_adv_logit_swap)_p(\d+)",
         name,
     )
     if m is not None:

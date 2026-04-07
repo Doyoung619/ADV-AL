@@ -46,10 +46,100 @@ def evaluate_accuracy(model, loader, device: torch.device) -> float:
     return 100.0 * correct / max(1, total)
 
 
+def _channel_tensor(values, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    return torch.tensor(values, device=device, dtype=dtype).view(1, -1, 1, 1)
+
+
+def _scaled_linf_eps(
+    epsilon: float,
+    std,
+    device: torch.device,
+    dtype: torch.dtype,
+    channels: int,
+) -> torch.Tensor:
+    if std is None:
+        return torch.full((1, channels, 1, 1), float(epsilon), device=device, dtype=dtype)
+    std_t = _channel_tensor(std, device=device, dtype=dtype)
+    return torch.full((1, channels, 1, 1), float(epsilon), device=device, dtype=dtype) / std_t
+
+
+def _clamp_to_valid_range(x: torch.Tensor, mean, std) -> torch.Tensor:
+    if mean is None or std is None:
+        return x.clamp(0.0, 1.0)
+    mean_t = _channel_tensor(mean, x.device, x.dtype)
+    std_t = _channel_tensor(std, x.device, x.dtype)
+    lower = (0.0 - mean_t) / std_t
+    upper = (1.0 - mean_t) / std_t
+    return torch.max(torch.min(x, upper), lower)
+
+
+def _build_adv_train_batch(model, images: torch.Tensor, labels: torch.Tensor, cfg) -> torch.Tensor:
+    attack = str(getattr(cfg, "adv_train_attack", "pgd")).lower()
+    epsilon = float(cfg.adv_train_epsilon if cfg.adv_train_epsilon is not None else cfg.epsilon)
+    mean = getattr(cfg, "cifar10_mean", None)
+    std = getattr(cfg, "cifar10_std", None)
+    channels = int(images.size(1))
+    eps_t = _scaled_linf_eps(
+        epsilon=epsilon,
+        std=std,
+        device=images.device,
+        dtype=images.dtype,
+        channels=channels,
+    )
+    x0 = images.detach()
+
+    was_training = model.training
+    model.eval()
+    try:
+        if attack == "fgsm":
+            x_adv = x0.clone().detach().requires_grad_(True)
+            logits = model(x_adv)
+            loss = F.cross_entropy(logits, labels, reduction="mean")
+            grad = torch.autograd.grad(loss, x_adv, only_inputs=True)[0]
+            x_adv = x0 + eps_t * grad.sign()
+            return _clamp_to_valid_range(x_adv, mean=mean, std=std).detach()
+
+        if attack == "pgd":
+            steps = max(1, int(cfg.adv_train_steps))
+            step_size = (
+                float(cfg.adv_train_step_size)
+                if cfg.adv_train_step_size is not None
+                else float(epsilon) / max(float(steps) / 2.0, 1.0)
+            )
+            alpha_t = _scaled_linf_eps(
+                epsilon=step_size,
+                std=std,
+                device=images.device,
+                dtype=images.dtype,
+                channels=channels,
+            )
+            if bool(cfg.adv_train_random_start):
+                delta = torch.empty_like(x0).uniform_(-1.0, 1.0) * eps_t
+                x_adv = _clamp_to_valid_range(x0 + delta, mean=mean, std=std)
+            else:
+                x_adv = x0.clone().detach()
+
+            for _ in range(steps):
+                x_adv = x_adv.detach().requires_grad_(True)
+                logits = model(x_adv)
+                loss = F.cross_entropy(logits, labels, reduction="mean")
+                grad = torch.autograd.grad(loss, x_adv, only_inputs=True)[0]
+                x_adv = x_adv.detach() + alpha_t * grad.sign()
+                delta = torch.clamp(x_adv - x0, min=-eps_t, max=eps_t)
+                x_adv = _clamp_to_valid_range(x0 + delta, mean=mean, std=std)
+            return x_adv.detach()
+    finally:
+        if was_training:
+            model.train()
+
+    raise ValueError(f"Unsupported adv_train_attack: {cfg.adv_train_attack}")
+
+
 def train_one_epoch(
     model,
     loader,
     optimizer,
+    cfg,
     device: torch.device,
     scaler=None,
     amp_enabled: bool = False,
@@ -67,13 +157,16 @@ def train_one_epoch(
         data_time_meter.update(now - prev_time)
 
         images = images.to(device, non_blocking=True)
-        if channels_last and images.ndim == 4:
-            images = images.contiguous(memory_format=torch.channels_last)
         labels = labels.to(device, non_blocking=True)
+        train_images = images
+        if str(getattr(cfg, "train_mode", "clean")).lower() == "adv":
+            train_images = _build_adv_train_batch(model=model, images=images, labels=labels, cfg=cfg)
+        if channels_last and train_images.ndim == 4:
+            train_images = train_images.contiguous(memory_format=torch.channels_last)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-            logits = model(images)
+            logits = model(train_images)
             loss = F.cross_entropy(logits, labels)
         if scaler is not None and amp_enabled:
             scaler.scale(loss).backward()
@@ -135,6 +228,7 @@ def train_model_for_round(
             model,
             train_loader,
             optimizer,
+            cfg,
             device,
             scaler=scaler,
             amp_enabled=amp_enabled,

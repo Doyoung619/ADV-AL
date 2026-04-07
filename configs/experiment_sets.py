@@ -52,6 +52,38 @@ EXPERIMENT_SET_DEFINITIONS: Dict[str, Dict] = {
         ),
         "description": "Main flagship comparison",
     },
+    "set_ADV_main": {
+        **_base(
+            datasets=["cifar10"],
+            models=["small_cnn", "resnet18"],
+            methods=[
+                "badge",
+                "random",
+                "batchbald",
+                "coreset",
+                "saal",
+                "logit_adv_disp_swap",
+                "logit_adv_disp_swap_p10",
+                "logit_adv_feat_swap",
+                "logit_adv_feat_swap_p10",
+                "logit_adv_logit_swap",
+                "logit_adv_logit_swap_p10",
+            ],
+            initial_labeled_size=500,
+            acquisition_size=200,
+            rounds=10,
+            epochs_per_round=80,
+            eval_epsilon=1.0 / 255.0,
+            seeds=[0, 1, 2, 3, 4],
+        ),
+        "extra_cli_args": {
+            "train_mode": "adv",
+            "adv_train_attack": "pgd",
+            "adv_train_epsilon": 1.0 / 255.0,
+            "adv_train_steps": 5,
+        },
+        "description": "Robust-training counterpart of set_A_main (CIFAR10 only).",
+    },
     "set_A_vgg_only": {
         **_base(
             datasets=["cifar10", "svhn", "fashionmnist"],

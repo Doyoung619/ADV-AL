@@ -47,6 +47,12 @@ class Config:
     weight_decay: float = 5e-4
     scheduler: str = "cosine"
     min_lr: float = 1e-5
+    train_mode: str = "clean"
+    adv_train_attack: str = "pgd"
+    adv_train_epsilon: Optional[float] = None
+    adv_train_steps: int = 5
+    adv_train_step_size: Optional[float] = None
+    adv_train_random_start: bool = True
 
     acquisition_method: str = "badge"
     run_all_methods: bool = False
@@ -233,6 +239,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--scheduler", type=str, choices=["cosine", "step"], default="cosine")
     parser.add_argument("--min-lr", type=float, default=1e-5)
+    parser.add_argument("--train-mode", choices=["clean", "adv"], default="clean")
+    parser.add_argument("--adv-train-attack", choices=["fgsm", "pgd"], default="pgd")
+    parser.add_argument("--adv-train-epsilon", type=_parse_optional_float, default=None)
+    parser.add_argument("--adv-train-steps", type=int, default=5)
+    parser.add_argument("--adv-train-step-size", type=_parse_optional_float, default=None)
+    parser.add_argument("--adv-train-random-start", action="store_true")
+    parser.add_argument("--no-adv-train-random-start", dest="adv_train_random_start", action="store_false")
+    parser.set_defaults(adv_train_random_start=True)
 
     parser.add_argument(
         "--acquisition-method",
@@ -296,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
             "logdet_adv_logit_swap",
             "logdet_adv_logit_swap_p10",
             "logdet_adv_logit_swap_p20",
+            "logit_adv_disp_swap",
+            "logit_adv_disp_swap_p10",
+            "logit_adv_feat_swap",
+            "logit_adv_feat_swap_p10",
+            "logit_adv_logit_swap",
+            "logit_adv_logit_swap_p10",
         ],
     )
     parser.add_argument("--run-all-methods", action="store_true")
@@ -511,6 +531,8 @@ def apply_mode_overrides(cfg: Config) -> Config:
         cfg.adv_pgd_steps = min(cfg.adv_pgd_steps, 3)
         cfg.logdet_adv_disp_pgd_steps = min(cfg.logdet_adv_disp_pgd_steps, 3)
         cfg.logdet_adv_disp_swap_max_rounds = min(cfg.logdet_adv_disp_swap_max_rounds, 1)
+        if cfg.adv_train_attack == "pgd":
+            cfg.adv_train_steps = min(cfg.adv_train_steps, 3)
         cfg.saal_candidate_pool_size = min(cfg.saal_candidate_pool_size, 512)
         if cfg.bait_candidate_pool_size is not None:
             cfg.bait_candidate_pool_size = min(cfg.bait_candidate_pool_size, 512)
@@ -561,6 +583,12 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         raise ValueError(
             f"bait_candidate_pool_size must be positive or None, got {cfg.bait_candidate_pool_size}"
         )
+    if cfg.adv_train_epsilon is not None and cfg.adv_train_epsilon <= 0.0:
+        raise ValueError(f"adv_train_epsilon must be positive or None, got {cfg.adv_train_epsilon}")
+    if cfg.adv_train_attack == "pgd" and cfg.adv_train_steps <= 0:
+        raise ValueError(f"adv_train_steps must be positive for pgd attack, got {cfg.adv_train_steps}")
+    if cfg.adv_train_step_size is not None and cfg.adv_train_step_size <= 0.0:
+        raise ValueError(f"adv_train_step_size must be positive or None, got {cfg.adv_train_step_size}")
     if cfg.logdet_adv_disp_epsilon <= 0.0:
         raise ValueError(f"logdet_adv_disp_epsilon must be positive, got {cfg.logdet_adv_disp_epsilon}")
     if cfg.logdet_adv_disp_lambda <= 0.0:
@@ -611,7 +639,7 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
             f"logdet_adv_disp_swap_jitter must be positive, got {cfg.logdet_adv_disp_swap_jitter}"
         )
     m = re.fullmatch(
-        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap|logit_adv_disp_swap|logit_adv_feat_swap|logit_adv_logit_swap)_p(\d+)",
         cfg.acquisition_method.lower(),
     )
     if m is not None:
