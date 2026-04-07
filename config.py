@@ -290,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
             "adv_displacement_logdet_swap_p10",
             "adv_displacement_logdet_swap_p20",
             "adv_displacement_logdet_swap_p25",
+            "logdet_adv_feat_swap",
+            "logdet_adv_feat_swap_p10",
+            "logdet_adv_feat_swap_p20",
+            "logdet_adv_logit_swap",
+            "logdet_adv_logit_swap_p10",
+            "logdet_adv_logit_swap_p20",
         ],
     )
     parser.add_argument("--run-all-methods", action="store_true")
@@ -605,7 +611,7 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
             f"logdet_adv_disp_swap_jitter must be positive, got {cfg.logdet_adv_disp_swap_jitter}"
         )
     m = re.fullmatch(
-        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?)_p(\d+)",
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         cfg.acquisition_method.lower(),
     )
     if m is not None:

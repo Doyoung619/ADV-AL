@@ -19,7 +19,12 @@ from acquisition.saal import SAALStrategy
 from acquisition.saal_dual_b import SAALDualBStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
-from acquisition.logdet_adv_disp import LogDetAdvDispStrategy, LogDetAdvDispSwapStrategy
+from acquisition.logdet_adv_disp import (
+    LogDetAdvDispStrategy,
+    LogDetAdvDispSwapStrategy,
+    LogDetAdvFeatSwapStrategy,
+    LogDetAdvLogitSwapStrategy,
+)
 from acquisition.ours import OursGapStrategy, OursGradDispStrategy, OursHessianStrategy, OursStrategy
 from acquisition.pfilter import (
     BALDPercentileBALDStrategy,
@@ -44,6 +49,8 @@ METHOD_REGISTRY = {
     "logdet_adv_disp_swap": LogDetAdvDispSwapStrategy,
     "semantic_logdet_swap": LogDetAdvDispSwapStrategy,
     "adv_displacement_logdet_swap": LogDetAdvDispSwapStrategy,
+    "logdet_adv_feat_swap": LogDetAdvFeatSwapStrategy,
+    "logdet_adv_logit_swap": LogDetAdvLogitSwapStrategy,
     "badge": BADGEStrategy,
     "badge_dual_a": BADGEDualAStrategy,
     "badge_dual_b": BADGEDualBStrategy,
@@ -72,7 +79,7 @@ METHOD_REGISTRY = {
 def build_acquisition_strategy(name: str, cfg):
     name = name.lower()
     m = re.fullmatch(
-        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?)_p(\d+)",
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         name,
     )
     if m is not None:

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from acquisition.utils import AcquisitionOutput, BaseAcquisition, clamp_to_valid_range, scaled_linf_eps, tensor_stats
 
@@ -46,6 +47,98 @@ def _fgsm_logit_displacement_attack(
     grad = torch.autograd.grad(displacement_obj, x_adv, only_inputs=True)[0]
     delta = torch.clamp(eps_t * grad.sign(), min=-eps_t, max=eps_t)
     return clamp_to_valid_range(x0 + delta, mean=mean, std=std).detach()
+
+
+def _extract_logits(forward_output: Union[torch.Tensor, Tuple[torch.Tensor, ...], List[torch.Tensor]]) -> torch.Tensor:
+    if isinstance(forward_output, (tuple, list)):
+        if len(forward_output) == 0:
+            raise ValueError("Model forward returned empty tuple/list.")
+        return forward_output[0]
+    return forward_output
+
+
+def forward_with_features(
+    model,
+    x: torch.Tensor,
+    require_features: bool = True,
+) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
+    """
+    Unified helper to fetch penultimate features and logits.
+    Supports models exposing either:
+    - forward(x, return_features=True) -> (logits, features)
+    - forward_features + forward_classifier
+    """
+    features = None
+    logits = None
+
+    try:
+        out = model(x, return_features=True)
+        if isinstance(out, (tuple, list)) and len(out) >= 2:
+            logits = out[0]
+            features = out[1]
+            return features, logits
+        logits = _extract_logits(out)
+    except TypeError:
+        pass
+
+    if features is None and hasattr(model, "forward_features") and hasattr(model, "forward_classifier"):
+        features = model.forward_features(x)
+        logits = model.forward_classifier(features)
+        return features, logits
+
+    if logits is None:
+        logits = _extract_logits(model(x))
+
+    if require_features and features is None:
+        raise RuntimeError(
+            "Could not extract penultimate features from model. "
+            "Expected forward(return_features=True) or forward_features/forward_classifier."
+        )
+    return features, logits
+
+
+def _fgsm_predictive_ce_attack(
+    model,
+    x0: torch.Tensor,
+    pseudo_labels: torch.Tensor,
+    eps_t: torch.Tensor,
+    mean: Optional[Sequence[float]],
+    std: Optional[Sequence[float]],
+) -> torch.Tensor:
+    x_adv = x0.detach().clone().requires_grad_(True)
+    logits = _extract_logits(model(x_adv))
+    ce_obj = F.cross_entropy(logits, pseudo_labels, reduction="mean")
+    grad = torch.autograd.grad(ce_obj, x_adv, only_inputs=True)[0]
+    delta = torch.clamp(eps_t * grad.sign(), min=-eps_t, max=eps_t)
+    return clamp_to_valid_range(x0 + delta, mean=mean, std=std).detach()
+
+
+def _pgd_predictive_ce_attack(
+    model,
+    x0: torch.Tensor,
+    pseudo_labels: torch.Tensor,
+    eps_t: torch.Tensor,
+    alpha_t: torch.Tensor,
+    steps: int,
+    random_start: bool,
+    mean: Optional[Sequence[float]],
+    std: Optional[Sequence[float]],
+) -> torch.Tensor:
+    if random_start:
+        delta = torch.empty_like(x0).uniform_(-1.0, 1.0) * eps_t
+        x_adv = clamp_to_valid_range(x0 + delta, mean=mean, std=std)
+    else:
+        x_adv = x0.clone().detach()
+
+    for _ in range(steps):
+        x_adv = x_adv.detach().requires_grad_(True)
+        logits = _extract_logits(model(x_adv))
+        ce_obj = F.cross_entropy(logits, pseudo_labels, reduction="mean")
+        grad = torch.autograd.grad(ce_obj, x_adv, only_inputs=True)[0]
+        x_adv = x_adv.detach() + alpha_t * grad.sign()
+        delta = torch.clamp(x_adv - x0, min=-eps_t, max=eps_t)
+        x_adv = clamp_to_valid_range(x0 + delta, mean=mean, std=std)
+    return x_adv.detach()
 
 
 def _pgd_logit_displacement_attack(
@@ -206,6 +299,160 @@ def compute_adv_displacement_embeddings(
         if clean_logits_all is not None:
             return empty, empty
         return empty
+    disp_cat = torch.cat(displacements, dim=0)
+    if clean_logits_all is not None:
+        return disp_cat, torch.cat(clean_logits_all, dim=0)
+    return disp_cat
+
+
+def compute_adv_semantic_displacement_embeddings(
+    model,
+    unlabeled_loader=None,
+    images: Optional[torch.Tensor] = None,
+    embedding_space: str = "features",
+    attack_type: str = "fgsm",
+    attack_norm: str = "linf",
+    epsilon: float = 1.0 / 255.0,
+    pgd_steps: int = 5,
+    pgd_step_size: Optional[float] = None,
+    pgd_random_start: bool = True,
+    mean: Optional[Sequence[float]] = None,
+    std: Optional[Sequence[float]] = None,
+    device: Optional[torch.device] = None,
+    progress_logger=None,
+    progress_method_name: str = "LOGDET_ADV_SEMANTIC",
+    tensor_batch_size: Optional[int] = None,
+    return_clean_logits: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Label-aware adversarial semantic displacements with predicted-label CE attack.
+
+    y_hat(x) = argmax z(x)
+    delta* approximately maximizes CE(z(x+delta), y_hat) under ||delta||_inf <= epsilon
+
+    Displacement:
+      - features: f(x+delta*) - f(x)
+      - logits:   z(x+delta*) - z(x)
+    """
+    if device is None:
+        device = next(model.parameters()).device
+
+    if float(epsilon) <= 0.0:
+        raise ValueError(f"epsilon must be positive, got {epsilon}")
+    if attack_norm.lower() != "linf":
+        raise ValueError(f"Only linf attack_norm is supported, got {attack_norm}")
+
+    embedding_space = embedding_space.lower()
+    if embedding_space not in {"features", "logits"}:
+        raise ValueError(f"embedding_space must be one of ['features','logits'], got {embedding_space}")
+
+    attack_type = attack_type.lower()
+    if attack_type not in {"fgsm", "pgd"}:
+        raise ValueError(f"Unsupported attack_type: {attack_type}")
+    if attack_type == "pgd" and int(pgd_steps) <= 0:
+        raise ValueError(f"pgd_steps must be positive, got {pgd_steps}")
+
+    was_training = model.training
+    model.eval()
+
+    displacements = []
+    clean_logits_all = [] if bool(return_clean_logits) else None
+    t0 = time.perf_counter()
+
+    for batch_idx, (batch_images, total_batches) in enumerate(
+        _iter_unlabeled_batches(
+            unlabeled_loader=unlabeled_loader,
+            images=images,
+            tensor_batch_size=tensor_batch_size,
+        ),
+        start=1,
+    ):
+        x0 = batch_images.to(device, non_blocking=True).detach()
+        channels = int(x0.size(1))
+        eps_t = scaled_linf_eps(
+            epsilon=float(epsilon),
+            std=std,
+            device=x0.device,
+            dtype=x0.dtype,
+            channels=channels,
+        )
+
+        with torch.no_grad():
+            clean_features, clean_logits = forward_with_features(
+                model=model,
+                x=x0,
+                require_features=(embedding_space == "features"),
+            )
+            pseudo_labels = torch.argmax(clean_logits, dim=1)
+            if clean_logits_all is not None:
+                clean_logits_all.append(clean_logits.to(dtype=torch.float32))
+
+        if attack_type == "fgsm":
+            x_adv = _fgsm_predictive_ce_attack(
+                model=model,
+                x0=x0,
+                pseudo_labels=pseudo_labels,
+                eps_t=eps_t,
+                mean=mean,
+                std=std,
+            )
+        else:
+            steps = int(pgd_steps)
+            if pgd_step_size is None:
+                step_size = float(epsilon) / max(float(steps) / 2.0, 1.0)
+            else:
+                step_size = float(pgd_step_size)
+            if step_size <= 0.0:
+                raise ValueError(f"pgd_step_size must be positive, got {step_size}")
+            alpha_t = scaled_linf_eps(
+                epsilon=step_size,
+                std=std,
+                device=x0.device,
+                dtype=x0.dtype,
+                channels=channels,
+            )
+            x_adv = _pgd_predictive_ce_attack(
+                model=model,
+                x0=x0,
+                pseudo_labels=pseudo_labels,
+                eps_t=eps_t,
+                alpha_t=alpha_t,
+                steps=steps,
+                random_start=bool(pgd_random_start),
+                mean=mean,
+                std=std,
+            )
+
+        with torch.no_grad():
+            adv_features, adv_logits = forward_with_features(
+                model=model,
+                x=x_adv,
+                require_features=(embedding_space == "features"),
+            )
+            if embedding_space == "features":
+                delta = adv_features - clean_features
+            else:
+                delta = adv_logits - clean_logits
+            displacements.append(delta.to(dtype=torch.float32))
+
+        if progress_logger is not None and (batch_idx % 10 == 0 or batch_idx == total_batches):
+            progress_logger.log_scoring_eta(
+                method=progress_method_name,
+                processed_batches=batch_idx,
+                total_batches=total_batches,
+                elapsed=time.perf_counter() - t0,
+                device=str(device),
+            )
+
+    if was_training:
+        model.train()
+
+    if len(displacements) == 0:
+        empty = torch.empty((0, 0), dtype=torch.float32, device=device)
+        if clean_logits_all is not None:
+            return empty, empty
+        return empty
+
     disp_cat = torch.cat(displacements, dim=0)
     if clean_logits_all is not None:
         return disp_cat, torch.cat(clean_logits_all, dim=0)
@@ -653,40 +900,72 @@ def refine_logdet_swaps(
     }
 
 
-class LogDetAdvDispStrategy(BaseAcquisition):
-    method_name: str = "logdet_adv_disp"
+class LogDetBaseStrategy(BaseAcquisition):
+    method_name: str = "logdet_base"
     enable_swap_refinement: bool = False
+    embedding_name: str = "logits"
+    objective_name: str = "logdet_lambdaI_plus_sum_adv_displacements"
+    debug_file_tag: str = "logdet_scores"
+    log_prefix: str = "LOGDET"
+    displacement_mode: str = "displacement_norm"  # displacement_norm | predictive_ce
+    semantic_embedding_space: str = "logits"  # features | logits
 
-    def select(
+    def _compute_displacements(
         self,
         model,
         unlabeled_loader,
-        labeled_loader,
+        device: torch.device,
+        progress_logger,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.displacement_mode == "displacement_norm":
+            return compute_adv_displacement_embeddings(
+                model=model,
+                unlabeled_loader=unlabeled_loader,
+                attack_type=self.cfg.logdet_adv_disp_attack,
+                attack_norm=self.cfg.logdet_adv_disp_attack_norm,
+                epsilon=self.cfg.logdet_adv_disp_epsilon,
+                pgd_steps=self.cfg.logdet_adv_disp_pgd_steps,
+                pgd_step_size=self.cfg.logdet_adv_disp_pgd_step_size,
+                pgd_random_start=self.cfg.logdet_adv_disp_pgd_random_start,
+                mean=self.cfg.cifar10_mean,
+                std=self.cfg.cifar10_std,
+                device=device,
+                progress_logger=progress_logger,
+                progress_method_name=f"{self.log_prefix}_ATTACK",
+                tensor_batch_size=self.cfg.pool_batch_size,
+                return_clean_logits=True,
+            )
+        if self.displacement_mode == "predictive_ce":
+            return compute_adv_semantic_displacement_embeddings(
+                model=model,
+                unlabeled_loader=unlabeled_loader,
+                embedding_space=self.semantic_embedding_space,
+                attack_type=self.cfg.logdet_adv_disp_attack,
+                attack_norm=self.cfg.logdet_adv_disp_attack_norm,
+                epsilon=self.cfg.logdet_adv_disp_epsilon,
+                pgd_steps=self.cfg.logdet_adv_disp_pgd_steps,
+                pgd_step_size=self.cfg.logdet_adv_disp_pgd_step_size,
+                pgd_random_start=self.cfg.logdet_adv_disp_pgd_random_start,
+                mean=self.cfg.cifar10_mean,
+                std=self.cfg.cifar10_std,
+                device=device,
+                progress_logger=progress_logger,
+                progress_method_name=f"{self.log_prefix}_ATTACK",
+                tensor_batch_size=self.cfg.pool_batch_size,
+                return_clean_logits=True,
+            )
+        raise ValueError(f"Unsupported displacement_mode: {self.displacement_mode}")
+
+    def _select_from_cached_embeddings(
+        self,
+        displacements: torch.Tensor,
+        clean_logits_all: torch.Tensor,
         unlabeled_indices: np.ndarray,
         budget: int,
+        scoring_time: float,
         device: torch.device,
         progress_logger=None,
     ) -> AcquisitionOutput:
-        t0 = time.perf_counter()
-        displacements, clean_logits_all = compute_adv_displacement_embeddings(
-            model=model,
-            unlabeled_loader=unlabeled_loader,
-            attack_type=self.cfg.logdet_adv_disp_attack,
-            attack_norm=self.cfg.logdet_adv_disp_attack_norm,
-            epsilon=self.cfg.logdet_adv_disp_epsilon,
-            pgd_steps=self.cfg.logdet_adv_disp_pgd_steps,
-            pgd_step_size=self.cfg.logdet_adv_disp_pgd_step_size,
-            pgd_random_start=self.cfg.logdet_adv_disp_pgd_random_start,
-            mean=self.cfg.cifar10_mean,
-            std=self.cfg.cifar10_std,
-            device=device,
-            progress_logger=progress_logger,
-            progress_method_name="LOGDET_ADV_DISP_ATTACK",
-            tensor_batch_size=self.cfg.pool_batch_size,
-            return_clean_logits=True,
-        )
-        scoring_time = time.perf_counter() - t0
-
         if displacements.numel() > 0:
             first_step_scores_all = displacements.pow(2).sum(dim=1) / float(self.cfg.logdet_adv_disp_lambda)
             disp_norm_sq_all = displacements.pow(2).sum(dim=1)
@@ -720,7 +999,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             score_chunk_size=self.cfg.logdet_adv_disp_score_chunk_size,
             jitter=self.cfg.logdet_adv_disp_jitter,
             progress_logger=progress_logger,
-            progress_method_name="LOGDET_ADV_DISP_GREEDY",
+            progress_method_name=f"{self.log_prefix}_GREEDY",
         )
         greedy_selection_time = time.perf_counter() - t_sel
 
@@ -739,7 +1018,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
                 swap_improvement_tol=float(getattr(self.cfg, "logdet_adv_disp_swap_improvement_tol", 1e-8)),
                 swap_downdate_tol=float(getattr(self.cfg, "logdet_adv_disp_swap_downdate_tol", 1e-6)),
                 progress_logger=progress_logger,
-                progress_method_name="LOGDET_ADV_DISP_SWAP",
+                progress_method_name=f"{self.log_prefix}_SWAP",
             )
             swap_time = time.perf_counter() - t_swap
         else:
@@ -766,7 +1045,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             selected_flag = np.zeros(len(unlabeled_indices), dtype=np.int64)
             selected_flag[picked_local_global] = 1
             debug_data = {
-                "__file_tag": "logdet_adv_disp_scores",
+                "__file_tag": self.debug_file_tag,
                 "__column_order": [
                     "index",
                     "disp_norm_sq",
@@ -786,7 +1065,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
         if progress_logger is not None:
             progress_logger.log(
                 (
-                    "[LOGDET_ADV_DISP] disp_norm_sq_stats "
+                    f"[{self.log_prefix}] disp_norm_sq_stats "
                     f"min={disp_norm_sq_stats['min']:.6f} max={disp_norm_sq_stats['max']:.6f} "
                     f"mean={disp_norm_sq_stats['mean']:.6f} std={disp_norm_sq_stats['std']:.6f}"
                 ),
@@ -794,7 +1073,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             )
             progress_logger.log(
                 (
-                    "[LOGDET_ADV_DISP] greedy_stats "
+                    f"[{self.log_prefix}] greedy_stats "
                     f"selected_mean_score={selected_mean_score:.6f} "
                     f"percentile={percentile:.3f} feasible={int(feasible_local.numel())}/{int(len(unlabeled_indices))} "
                     f"percentile_basis=entropy "
@@ -806,7 +1085,7 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             if bool(self.enable_swap_refinement):
                 progress_logger.log(
                     (
-                        "[LOGDET_ADV_DISP] swap_stats "
+                        f"[{self.log_prefix}] swap_stats "
                         f"accepted={int(swap_debug.get('accepted_swaps', 0))} "
                         f"rounds={int(swap_debug.get('swap_rounds_run', 0))} "
                         f"obj_greedy={float(select_debug.get('final_logdet_objective', float('nan'))):.6f} "
@@ -824,8 +1103,8 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             selection_time_sec=float(selection_time),
             extras={
                 "method": method_name,
-                "embedding": "logits",
-                "objective": "logdet_lambdaI_plus_sum_adv_displacements",
+                "embedding": self.embedding_name,
+                "objective": self.objective_name,
                 "attack_type": self.cfg.logdet_adv_disp_attack,
                 "attack_norm": self.cfg.logdet_adv_disp_attack_norm,
                 "epsilon": float(self.cfg.logdet_adv_disp_epsilon),
@@ -890,7 +1169,68 @@ class LogDetAdvDispStrategy(BaseAcquisition):
             debug_data=debug_data,
         )
 
+    def select(
+        self,
+        model,
+        unlabeled_loader,
+        labeled_loader,
+        unlabeled_indices: np.ndarray,
+        budget: int,
+        device: torch.device,
+        progress_logger=None,
+    ) -> AcquisitionOutput:
+        t0 = time.perf_counter()
+        displacements, clean_logits_all = self._compute_displacements(
+            model=model,
+            unlabeled_loader=unlabeled_loader,
+            device=device,
+            progress_logger=progress_logger,
+        )
+        scoring_time = time.perf_counter() - t0
+        return self._select_from_cached_embeddings(
+            displacements=displacements,
+            clean_logits_all=clean_logits_all,
+            unlabeled_indices=unlabeled_indices,
+            budget=budget,
+            scoring_time=float(scoring_time),
+            device=device,
+            progress_logger=progress_logger,
+        )
+
+
+class LogDetAdvDispStrategy(LogDetBaseStrategy):
+    method_name: str = "logdet_adv_disp"
+    enable_swap_refinement: bool = False
+    embedding_name: str = "logits"
+    objective_name: str = "logdet_lambdaI_plus_sum_adv_displacements"
+    debug_file_tag: str = "logdet_adv_disp_scores"
+    log_prefix: str = "LOGDET_ADV_DISP"
+    displacement_mode: str = "displacement_norm"
+    semantic_embedding_space: str = "logits"
+
 
 class LogDetAdvDispSwapStrategy(LogDetAdvDispStrategy):
     method_name: str = "logdet_adv_disp_swap"
     enable_swap_refinement: bool = True
+
+
+class LogDetAdvFeatSwapStrategy(LogDetBaseStrategy):
+    method_name: str = "logdet_adv_feat_swap"
+    enable_swap_refinement: bool = True
+    embedding_name: str = "features"
+    objective_name: str = "logdet_lambdaI_plus_sum_adv_feature_displacements_predce"
+    debug_file_tag: str = "logdet_adv_feat_swap_scores"
+    log_prefix: str = "LOGDET_ADV_FEAT_SWAP"
+    displacement_mode: str = "predictive_ce"
+    semantic_embedding_space: str = "features"
+
+
+class LogDetAdvLogitSwapStrategy(LogDetBaseStrategy):
+    method_name: str = "logdet_adv_logit_swap"
+    enable_swap_refinement: bool = True
+    embedding_name: str = "logits"
+    objective_name: str = "logdet_lambdaI_plus_sum_adv_logit_displacements_predce"
+    debug_file_tag: str = "logdet_adv_logit_swap_scores"
+    log_prefix: str = "LOGDET_ADV_LOGIT_SWAP"
+    displacement_mode: str = "predictive_ce"
+    semantic_embedding_space: str = "logits"
