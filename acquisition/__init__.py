@@ -20,6 +20,9 @@ from acquisition.saal_dual_b import SAALDualBStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
 from acquisition.logdet_adv_disp import (
+    AdvGradDisplacementLogDetStrategy,
+    AdvQFilterLogDetStrategy,
+    AdvQTopKStrategy,
     LogDetAdvDispStrategy,
     LogDetAdvDispSwapStrategy,
     LogDetAdvFeatSwapStrategy,
@@ -43,6 +46,9 @@ METHOD_REGISTRY = {
     "saal_dual_b": SAALDualBStrategy,
     "margin": MarginStrategy,
     "margin_dual_b": MarginDualBStrategy,
+    "adv_grad_displacement_logdet": AdvGradDisplacementLogDetStrategy,
+    "adv_q_topk": AdvQTopKStrategy,
+    "adv_q_filter_logdet": AdvQFilterLogDetStrategy,
     "logdet_adv_disp": LogDetAdvDispStrategy,
     "semantic_logdet": LogDetAdvDispStrategy,
     "adv_displacement_logdet": LogDetAdvDispStrategy,
@@ -78,6 +84,14 @@ METHOD_REGISTRY = {
 
 def build_acquisition_strategy(name: str, cfg):
     name = name.lower()
+    m_adv_q = re.fullmatch(r"adv_q_filter_logdet_([0-9]+)", name)
+    if m_adv_q is not None:
+        pct = int(m_adv_q.group(1))
+        if pct <= 0 or pct > 100:
+            raise ValueError(f"Unsupported adv_q_filter_logdet retain suffix: {name}")
+        if hasattr(cfg, "retain_fraction"):
+            cfg.retain_fraction = float(pct) / 100.0
+        name = "adv_q_filter_logdet"
     m = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         name,

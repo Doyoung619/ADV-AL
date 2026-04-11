@@ -28,6 +28,9 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "badge",
         "bait",
         "batchbald",
+        "adv_grad_displacement_logdet",
+        "adv_q_topk",
+        "adv_q_filter_logdet",
         "logdet_adv_disp",
         "logdet_adv_disp_swap",
         "semantic_logdet",
@@ -49,6 +52,14 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
             raise ValueError(f"Invalid percentile in method name: {method_name}")
         percentile = f"{pct / 100.0:.4f}".rstrip("0").rstrip(".")
         return head, {"logdet_adv_disp_percentile": percentile}
+
+    mm_adv_q = re.fullmatch(r"adv_q_filter_logdet_([0-9]+)", m)
+    if mm_adv_q is not None:
+        pct = int(mm_adv_q.group(1))
+        if pct <= 0 or pct > 100:
+            raise ValueError(f"Invalid retain fraction in method name: {method_name}")
+        retain_fraction = f"{pct / 100.0:.4f}".rstrip("0").rstrip(".")
+        return "adv_q_filter_logdet", {"retain_fraction": retain_fraction}
     if m == "ours_l2":
         return "ours", {}
 

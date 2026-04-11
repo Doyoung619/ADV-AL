@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as tv_models
 from torchvision.models.resnet import BasicBlock, ResNet
 
@@ -120,6 +121,8 @@ class CIFARSmallCNNDropout(nn.Module):
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
+        # Keep feature dimensionality stable across input resolutions (e.g., 32x32 and 64x64).
+        x = F.adaptive_avg_pool2d(x, output_size=(8, 8))
         x = torch.flatten(x, 1)
         x = torch.relu(self.hidden(x))
         return x
