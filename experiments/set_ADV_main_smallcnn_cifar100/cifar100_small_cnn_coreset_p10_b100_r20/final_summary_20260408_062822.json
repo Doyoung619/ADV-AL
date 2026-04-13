@@ -1,0 +1,15 @@
+[
+  {
+    "method": "coreset",
+    "run_dir": "/data1/doyoung/ADV-AL/experiments/set_ADV_main_moreround_cifar100/cifar100_small_cnn_coreset_p10_b100_r20/seed_0",
+    "total_time_sec": 334.1265786339063,
+    "final_round": 20,
+    "final_labeled_size": 2500,
+    "final_clean_acc": 18.26,
+    "final_fgsm_acc": 13.93,
+    "final_pgd_acc": 13.85,
+    "final_avg_logit_mismatch": NaN,
+    "best_clean_acc": 18.88,
+    "best_pgd_acc": 14.46
+  }
+]

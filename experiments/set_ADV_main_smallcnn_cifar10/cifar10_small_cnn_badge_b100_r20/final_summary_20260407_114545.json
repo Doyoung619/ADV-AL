@@ -1,0 +1,15 @@
+[
+  {
+    "method": "badge",
+    "run_dir": "/data1/doyoung/ADV-AL/experiments/set_ADV_main_moreround/cifar10_small_cnn_badge_b100_r20/seed_2",
+    "total_time_sec": 760.7314141828101,
+    "final_round": 20,
+    "final_labeled_size": 2500,
+    "final_clean_acc": 63.67,
+    "final_fgsm_acc": 52.73,
+    "final_pgd_acc": 52.43,
+    "final_avg_logit_mismatch": NaN,
+    "best_clean_acc": 64.65,
+    "best_pgd_acc": 53.13
+  }
+]

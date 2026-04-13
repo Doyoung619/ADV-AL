@@ -1,8 +1,11 @@
 import argparse
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
+
+from datasets import default_dataset_stats
 
 
 @dataclass
@@ -36,7 +39,7 @@ class Config:
     train_batch_size: int = 128
     eval_batch_size: int = 256
     pool_batch_size: int = 256
-    acquisition_pool_subset_size: Optional[int] = None
+    acquisition_pool_subset_size: Optional[int] = 5000
     epochs_per_round: int = 50
     optimizer: str = "adamw"
     lr: float = 1e-3
@@ -44,6 +47,12 @@ class Config:
     weight_decay: float = 5e-4
     scheduler: str = "cosine"
     min_lr: float = 1e-5
+    train_mode: str = "clean"
+    adv_train_attack: str = "pgd"
+    adv_train_epsilon: Optional[float] = None
+    adv_train_steps: int = 3
+    adv_train_step_size: Optional[float] = None
+    adv_train_random_start: bool = True
 
     acquisition_method: str = "badge"
     run_all_methods: bool = False
@@ -52,21 +61,40 @@ class Config:
     epsilon: float = 8.0 / 255.0
     attack_norm: str = "linf"
     acquisition_attack: str = "pgd"
-    acquisition_pgd_steps: int = 5
+    acquisition_pgd_steps: int = 3
     acquisition_pgd_alpha: float = 2.0 / 255.0
+    logdet_adv_disp_attack: str = "fgsm"
+    logdet_adv_disp_attack_norm: str = "linf"
+    logdet_adv_disp_epsilon: float = 1.0 / 255.0
+    logdet_adv_disp_lambda: float = 1e-3
+    logdet_adv_disp_pgd_steps: int = 3
+    logdet_adv_disp_pgd_step_size: Optional[float] = None
+    logdet_adv_disp_pgd_random_start: bool = True
+    logdet_adv_disp_score_chunk_size: int = 8192
+    logdet_adv_disp_jitter: float = 1e-8
+    logdet_adv_disp_percentile: float = 0.0
+    logdet_adv_disp_swap_max_rounds: int = 3
+    logdet_adv_disp_swap_top_unselected: int = 200
+    logdet_adv_disp_swap_top_selected: int = 0
+    logdet_adv_disp_swap_improvement_tol: float = 1e-8
+    logdet_adv_disp_swap_downdate_tol: float = 1e-6
+    logdet_adv_disp_swap_jitter: float = 1e-8
     ours_delta_objective: str = "logit_mismatch"
     ours_hessian_lambda: float = 1e-3
     ours_gap_use_fixed_clean_classes: bool = True
-    eval_pgd_steps: int = 10
+    eval_pgd_steps: int = 3
     eval_pgd_alpha: float = 2.0 / 255.0
     skip_pgd_eval: bool = False
     skip_logit_mismatch_eval: bool = False
 
     mc_passes: int = 20
     entropy_use_mc: bool = False
-    batchbald_num_mc_samples: int = 100
-    batchbald_num_joint_entropy_samples: int = 10000
-    batchbald_exact_joint_entropy_steps: int = 4
+    # Speed-priority defaults for BatchBALD.
+    batchbald_num_mc_samples: int = 32
+    batchbald_num_joint_entropy_samples: int = 2048
+    batchbald_exact_joint_entropy_steps: int = 2
+    # Larger chunk improves throughput in CoreSet distance computation on modern CPUs.
+    coreset_chunk_size: int = 8192
 
     saal_rho: float = 0.05
     saal_norm: str = "linf"
@@ -79,6 +107,20 @@ class Config:
     badge_projection_dim: int = 0
     badge_candidate_cap: Optional[int] = None
     epsilon_acq: float = 1.0 / 255.0
+    attack_steps: int = 3
+    attack_step_size: Optional[float] = None
+    attack_random_start: bool = True
+    logdet_lambda: float = 1e-3
+    adv_grad_displacement_use_explicit_embedding: bool = False
+    adv_grad_displacement_percentile: float = 0.0
+    adv_grad_displacement_filter_basis: str = "clean_grad_norm"
+    prefilter_metric: str = "none"
+    prefilter_drop_percent: float = 0.0
+    retain_fraction: float = 0.9
+    adv_q_attack_type: str = "pgd"
+    adv_q_pgd_steps: int = 3
+    adv_q_pgd_step_size: Optional[float] = None
+    adv_q_pgd_random_start: bool = True
     adv_attack_type_for_acquisition: str = "fgsm"
     adv_pgd_steps: int = 3
     adv_pgd_step_size: Optional[float] = None
@@ -137,14 +179,19 @@ def _parse_bool(value: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pool-based active learning benchmark on CIFAR-10.")
-    parser.add_argument("--dataset", type=str, default="cifar10")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="cifar10",
+        choices=["cifar10", "cifar100", "svhn", "fashionmnist", "tinyimagenet", "cinic10", "stl10"],
+    )
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--download-if-missing", action="store_true")
     parser.add_argument("--output-dir", type=str, default="./outputs")
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--resume-run-dir", type=str, default=None)
 
-    parser.add_argument("--model", type=str, default="small_cnn", choices=["resnet18", "resnet10", "small_cnn"])
+    parser.add_argument("--model", type=str, default="small_cnn", choices=["resnet18", "resnet10", "small_cnn", "vgg16"])
     parser.add_argument("--dropout-p", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", type=str, default="cuda")
@@ -201,8 +248,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--acq_candidate_size",
         dest="acquisition_pool_subset_size",
         type=_parse_optional_int,
-        default=None,
-        help="If set, score only a random subset of unlabeled pool per round (None=full pool).",
+        default=5000,
+        help="Score a random subset of unlabeled pool per round (default=5000, use None for full pool).",
     )
     parser.add_argument("--epochs-per-round", "--epochs_per_round", dest="epochs_per_round", type=int, default=50)
     parser.add_argument("--optimizer", type=str, choices=["sgd", "adamw"], default="adamw")
@@ -211,6 +258,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--scheduler", type=str, choices=["cosine", "step"], default="cosine")
     parser.add_argument("--min-lr", type=float, default=1e-5)
+    parser.add_argument("--train-mode", choices=["clean", "adv"], default="clean")
+    parser.add_argument("--adv-train-attack", choices=["fgsm", "pgd"], default="pgd")
+    parser.add_argument("--adv-train-epsilon", type=_parse_optional_float, default=None)
+    parser.add_argument("--adv-train-steps", type=int, default=3)
+    parser.add_argument("--adv-train-step-size", type=_parse_optional_float, default=None)
+    parser.add_argument("--adv-train-random-start", action="store_true")
+    parser.add_argument("--no-adv-train-random-start", dest="adv_train_random_start", action="store_false")
+    parser.set_defaults(adv_train_random_start=True)
 
     parser.add_argument(
         "--acquisition-method",
@@ -228,7 +283,18 @@ def build_parser() -> argparse.ArgumentParser:
             "saal_dual_b",
             "margin",
             "margin_dual_b",
+            "adv_grad_displacement_logdet",
+            "adv_grad_displacement_logdet_p10",
+            "adv_grad_displacement_logdet_p20",
+            "adv_grad_displacement_logdet_p25",
+            "adv_q_topk",
+            "adv_q_filter_logdet",
+            "adv_q_filter_logdet_90",
+            "adv_q_filter_logdet_75",
             "badge",
+            "ours_secant_badge",
+            "ours_secant_logdet_refine",
+            "ours_secant_logdet_refine_p10",
             "badge_dual_a",
             "badge_dual_b",
             "badge_adv_mult",
@@ -236,6 +302,10 @@ def build_parser() -> argparse.ArgumentParser:
             "bait",
             "bald",
             "batchbald",
+            "entropy_pfilter_random",
+            "entropy_pfilter_entropy",
+            "bald_pfilter_random",
+            "bald_pfilter_bald",
             "coreset",
             "kcenter",
             "core_set",
@@ -246,6 +316,30 @@ def build_parser() -> argparse.ArgumentParser:
             "ours_hessian",
             "ours_gap",
             "ours_grad_disp",
+            "logdet_adv_disp",
+            "logdet_adv_disp_p10",
+            "logdet_adv_disp_p20",
+            "logdet_adv_disp_p25",
+            "logdet_adv_disp_swap",
+            "logdet_adv_disp_swap_p10",
+            "logdet_adv_disp_swap_p20",
+            "logdet_adv_disp_swap_p25",
+            "semantic_logdet",
+            "semantic_logdet_swap",
+            "semantic_logdet_swap_p10",
+            "semantic_logdet_swap_p20",
+            "semantic_logdet_swap_p25",
+            "adv_displacement_logdet",
+            "adv_displacement_logdet_swap",
+            "adv_displacement_logdet_swap_p10",
+            "adv_displacement_logdet_swap_p20",
+            "adv_displacement_logdet_swap_p25",
+            "logdet_adv_feat_swap",
+            "logdet_adv_feat_swap_p10",
+            "logdet_adv_feat_swap_p20",
+            "logdet_adv_logit_swap",
+            "logdet_adv_logit_swap_p10",
+            "logdet_adv_logit_swap_p20",
         ],
     )
     parser.add_argument("--run-all-methods", action="store_true")
@@ -254,8 +348,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epsilon", type=float, default=8.0 / 255.0)
     parser.add_argument("--attack-norm", type=str, default="linf")
     parser.add_argument("--acquisition-attack", choices=["fgsm", "pgd"], default="pgd")
-    parser.add_argument("--acquisition-pgd-steps", type=int, default=5)
+    parser.add_argument("--acquisition-pgd-steps", type=int, default=3)
     parser.add_argument("--acquisition-pgd-alpha", type=float, default=2.0 / 255.0)
+    parser.add_argument("--logdet-adv-disp-attack", choices=["fgsm", "pgd"], default="fgsm")
+    parser.add_argument("--logdet-adv-disp-attack-norm", choices=["linf"], default="linf")
+    parser.add_argument("--logdet-adv-disp-epsilon", type=float, default=1.0 / 255.0)
+    parser.add_argument("--logdet-adv-disp-lambda", type=float, default=1e-3)
+    parser.add_argument("--logdet-adv-disp-pgd-steps", type=int, default=3)
+    parser.add_argument(
+        "--logdet-adv-disp-pgd-step-size",
+        type=_parse_optional_float,
+        default=None,
+    )
+    parser.add_argument("--logdet-adv-disp-pgd-random-start", action="store_true")
+    parser.add_argument(
+        "--no-logdet-adv-disp-pgd-random-start",
+        dest="logdet_adv_disp_pgd_random_start",
+        action="store_false",
+    )
+    parser.set_defaults(logdet_adv_disp_pgd_random_start=True)
+    parser.add_argument("--logdet-adv-disp-score-chunk-size", type=int, default=8192)
+    parser.add_argument("--logdet-adv-disp-jitter", type=float, default=1e-8)
+    parser.add_argument("--logdet-adv-disp-percentile", type=float, default=0.0)
+    parser.add_argument("--logdet-adv-disp-swap-max-rounds", type=int, default=3)
+    parser.add_argument("--logdet-adv-disp-swap-top-unselected", type=int, default=200)
+    parser.add_argument("--logdet-adv-disp-swap-top-selected", type=int, default=0)
+    parser.add_argument("--logdet-adv-disp-swap-improvement-tol", type=float, default=1e-8)
+    parser.add_argument("--logdet-adv-disp-swap-downdate-tol", type=float, default=1e-6)
+    parser.add_argument("--logdet-adv-disp-swap-jitter", type=float, default=1e-8)
     parser.add_argument(
         "--ours-delta-objective",
         type=str,
@@ -266,7 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ours-gap-use-fixed-clean-classes", action="store_true")
     parser.add_argument("--no-ours-gap-use-fixed-clean-classes", dest="ours_gap_use_fixed_clean_classes", action="store_false")
     parser.set_defaults(ours_gap_use_fixed_clean_classes=True)
-    parser.add_argument("--eval-pgd-steps", type=int, default=10)
+    parser.add_argument("--eval-pgd-steps", type=int, default=3)
     parser.add_argument("--eval-pgd-alpha", type=float, default=2.0 / 255.0)
     parser.add_argument("--skip-pgd-eval", action="store_true")
     parser.add_argument("--skip-logit-mismatch-eval", action="store_true")
@@ -278,22 +398,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--batchbald_num_mc_samples",
         dest="batchbald_num_mc_samples",
         type=int,
-        default=100,
+        default=32,
     )
     parser.add_argument(
         "--batchbald-num-joint-entropy-samples",
         "--batchbald_num_joint_entropy_samples",
         dest="batchbald_num_joint_entropy_samples",
         type=int,
-        default=10000,
+        default=2048,
     )
     parser.add_argument(
         "--batchbald-exact-joint-entropy-steps",
         "--batchbald_exact_joint_entropy_steps",
         dest="batchbald_exact_joint_entropy_steps",
         type=int,
-        default=4,
+        default=2,
     )
+    parser.add_argument("--coreset-chunk-size", "--coreset_chunk_size", dest="coreset_chunk_size", type=int, default=8192)
     parser.add_argument("--saal-rho", "--saal_rho", dest="saal_rho", type=float, default=0.05)
     parser.add_argument("--saal-norm", "--saal_norm", dest="saal_norm", choices=["linf", "l2"], default="linf")
     parser.add_argument("--saal-use-kmeanspp", action="store_true")
@@ -312,6 +433,125 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--badge-projection-dim", type=int, default=0)
     parser.add_argument("--badge-candidate-cap", type=_parse_optional_int, default=None)
     parser.add_argument("--epsilon-acq", "--epsilon_acq", dest="epsilon_acq", type=float, default=1.0 / 255.0)
+    parser.add_argument(
+        "--attack-steps",
+        "--attack_steps",
+        dest="attack_steps",
+        type=int,
+        default=3,
+        help="Acquisition-time PGD ascent steps for adv_grad_displacement_logdet.",
+    )
+    parser.add_argument(
+        "--attack-step-size",
+        "--attack_step_size",
+        dest="attack_step_size",
+        type=_parse_optional_float,
+        default=None,
+        help="Acquisition-time PGD ascent step size; None derives it from eps_acq and attack_steps.",
+    )
+    parser.add_argument("--attack-random-start", "--attack_random_start", dest="attack_random_start", action="store_true")
+    parser.add_argument(
+        "--no-attack-random-start",
+        dest="attack_random_start",
+        action="store_false",
+    )
+    parser.set_defaults(attack_random_start=True)
+    parser.add_argument(
+        "--logdet-lambda",
+        "--logdet_lambda",
+        dest="logdet_lambda",
+        type=float,
+        default=1e-3,
+        help="Regularization lambda for adv_grad_displacement_logdet dual logdet.",
+    )
+    parser.add_argument(
+        "--adv-grad-displacement-use-explicit-embedding",
+        "--adv_grad_displacement_use_explicit_embedding",
+        dest="adv_grad_displacement_use_explicit_embedding",
+        action="store_true",
+        help="Debug/tiny-model mode: materialize Gamma vectors instead of using the Gram kernel.",
+    )
+    parser.add_argument(
+        "--no-adv-grad-displacement-use-explicit-embedding",
+        dest="adv_grad_displacement_use_explicit_embedding",
+        action="store_false",
+    )
+    parser.set_defaults(adv_grad_displacement_use_explicit_embedding=False)
+    parser.add_argument(
+        "--adv-grad-displacement-percentile",
+        "--adv_grad_displacement_percentile",
+        dest="adv_grad_displacement_percentile",
+        type=float,
+        default=0.0,
+        help=(
+            "For adv_grad_displacement_logdet, drop the lowest percentile of "
+            "last-layer gradient-norm uncertainty scores before logdet selection."
+        ),
+    )
+    parser.add_argument(
+        "--adv-grad-displacement-filter-basis",
+        "--adv_grad_displacement_filter_basis",
+        dest="adv_grad_displacement_filter_basis",
+        choices=["clean_grad_norm", "adv_grad_norm", "gamma_norm"],
+        default="clean_grad_norm",
+        help="Score used by adv_grad_displacement_logdet percentile filtering.",
+    )
+    parser.add_argument(
+        "--prefilter-metric",
+        "--prefilter_metric",
+        "--uncertainty-filter-metric",
+        "--uncertainty_filter_metric",
+        dest="prefilter_metric",
+        type=str,
+        default="none",
+        help="Optional acquisition prefilter metric. For secant logdet use D for ||phi(x)||.",
+    )
+    parser.add_argument(
+        "--prefilter-drop-percent",
+        "--prefilter_drop_percent",
+        "--uncertainty-filter-percentile",
+        "--uncertainty_filter_percentile",
+        dest="prefilter_drop_percent",
+        type=float,
+        default=0.0,
+        help="Drop the bottom p percent before selection; p10 keeps ceil(0.9*N).",
+    )
+    parser.add_argument(
+        "--retain-fraction",
+        "--retain_fraction",
+        dest="retain_fraction",
+        type=float,
+        default=0.9,
+        help="For adv_q_filter_logdet, keep top ceil(retain_fraction * N) samples by q score.",
+    )
+    parser.add_argument(
+        "--adv-q-attack-type",
+        "--adv_q_attack_type",
+        dest="adv_q_attack_type",
+        choices=["fgsm", "pgd"],
+        default="pgd",
+    )
+    parser.add_argument(
+        "--adv-q-pgd-steps",
+        "--adv_q_pgd_steps",
+        dest="adv_q_pgd_steps",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--adv-q-pgd-step-size",
+        "--adv_q_pgd_step_size",
+        dest="adv_q_pgd_step_size",
+        type=_parse_optional_float,
+        default=None,
+    )
+    parser.add_argument("--adv-q-pgd-random-start", action="store_true")
+    parser.add_argument(
+        "--no-adv-q-pgd-random-start",
+        dest="adv_q_pgd_random_start",
+        action="store_false",
+    )
+    parser.set_defaults(adv_q_pgd_random_start=True)
     parser.add_argument(
         "--adv-attack-type-for-acquisition",
         "--adv_attack_type_for_acquisition",
@@ -432,9 +672,29 @@ def apply_mode_overrides(cfg: Config) -> Config:
         cfg.eval_pgd_steps = min(cfg.eval_pgd_steps, 3)
         cfg.acquisition_pgd_steps = min(cfg.acquisition_pgd_steps, 3)
         cfg.adv_pgd_steps = min(cfg.adv_pgd_steps, 3)
+        cfg.adv_q_pgd_steps = min(cfg.adv_q_pgd_steps, 3)
+        cfg.attack_steps = min(cfg.attack_steps, 3)
+        cfg.logdet_adv_disp_pgd_steps = min(cfg.logdet_adv_disp_pgd_steps, 3)
+        cfg.logdet_adv_disp_swap_max_rounds = min(cfg.logdet_adv_disp_swap_max_rounds, 1)
+        if cfg.adv_train_attack == "pgd":
+            cfg.adv_train_steps = min(cfg.adv_train_steps, 3)
         cfg.saal_candidate_pool_size = min(cfg.saal_candidate_pool_size, 512)
         if cfg.bait_candidate_pool_size is not None:
             cfg.bait_candidate_pool_size = min(cfg.bait_candidate_pool_size, 512)
+    return cfg
+
+
+def _apply_dataset_defaults(cfg: Config) -> Config:
+    mean, std = default_dataset_stats(cfg.dataset)
+    cfg.cifar10_mean = tuple(float(x) for x in mean)
+    cfg.cifar10_std = tuple(float(x) for x in std)
+    ds = cfg.dataset.lower()
+    if ds == "cifar100":
+        cfg.num_classes = 100
+    elif ds == "tinyimagenet":
+        cfg.num_classes = 200
+    else:
+        cfg.num_classes = 10
     return cfg
 
 
@@ -442,6 +702,7 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = Config(**vars(args))
+    cfg = _apply_dataset_defaults(cfg)
     if not (0.0 <= cfg.dual_percentile <= 1.0):
         raise ValueError(f"dual_percentile must be in [0, 1], got {cfg.dual_percentile}")
     if cfg.saal_rho < 0.0:
@@ -464,12 +725,152 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
             "batchbald_exact_joint_entropy_steps must be non-negative, "
             f"got {cfg.batchbald_exact_joint_entropy_steps}"
         )
+    if cfg.coreset_chunk_size <= 0:
+        raise ValueError(f"coreset_chunk_size must be positive, got {cfg.coreset_chunk_size}")
     if cfg.bait_oversample_factor < 1:
         raise ValueError(f"bait_oversample_factor must be >= 1, got {cfg.bait_oversample_factor}")
     if cfg.bait_candidate_pool_size is not None and cfg.bait_candidate_pool_size <= 0:
         raise ValueError(
             f"bait_candidate_pool_size must be positive or None, got {cfg.bait_candidate_pool_size}"
         )
+    if cfg.adv_train_epsilon is not None and cfg.adv_train_epsilon <= 0.0:
+        raise ValueError(f"adv_train_epsilon must be positive or None, got {cfg.adv_train_epsilon}")
+    if cfg.adv_train_attack == "pgd" and cfg.adv_train_steps <= 0:
+        raise ValueError(f"adv_train_steps must be positive for pgd attack, got {cfg.adv_train_steps}")
+    if cfg.adv_train_step_size is not None and cfg.adv_train_step_size <= 0.0:
+        raise ValueError(f"adv_train_step_size must be positive or None, got {cfg.adv_train_step_size}")
+    if not (0.0 < cfg.retain_fraction <= 1.0):
+        raise ValueError(f"retain_fraction must be in (0, 1], got {cfg.retain_fraction}")
+    if cfg.epsilon_acq < 0.0:
+        raise ValueError(f"epsilon_acq must be non-negative, got {cfg.epsilon_acq}")
+    if cfg.epsilon_acq == 0.0 and cfg.acquisition_method.lower() not in {
+        "ours_secant_badge",
+        "ours_secant_logdet_refine",
+        "ours_secant_logdet_refine_p10",
+    }:
+        raise ValueError(f"epsilon_acq must be positive for {cfg.acquisition_method}, got {cfg.epsilon_acq}")
+    if cfg.attack_steps <= 0:
+        raise ValueError(f"attack_steps must be positive, got {cfg.attack_steps}")
+    if cfg.attack_step_size is not None and cfg.attack_step_size <= 0.0:
+        raise ValueError(f"attack_step_size must be positive or None, got {cfg.attack_step_size}")
+    if cfg.logdet_lambda <= 0.0:
+        raise ValueError(f"logdet_lambda must be positive, got {cfg.logdet_lambda}")
+    if not (0.0 <= cfg.adv_grad_displacement_percentile <= 1.0):
+        raise ValueError(
+            "adv_grad_displacement_percentile must be in [0, 1], "
+            f"got {cfg.adv_grad_displacement_percentile}"
+        )
+    if cfg.adv_grad_displacement_filter_basis not in {"clean_grad_norm", "adv_grad_norm", "gamma_norm"}:
+        raise ValueError(
+            "adv_grad_displacement_filter_basis must be one of "
+            "['clean_grad_norm', 'adv_grad_norm', 'gamma_norm'], "
+            f"got {cfg.adv_grad_displacement_filter_basis}"
+        )
+    prefilter_metric_raw = str(cfg.prefilter_metric).lower()
+    if prefilter_metric_raw in {"", "none", "off", "false"}:
+        cfg.prefilter_metric = "none"
+    elif prefilter_metric_raw in {"d", "secant_norm"}:
+        cfg.prefilter_metric = "D"
+    else:
+        raise ValueError("prefilter_metric must be one of ['none', 'D'], got " f"{cfg.prefilter_metric}")
+    if not (0.0 <= float(cfg.prefilter_drop_percent) <= 100.0):
+        raise ValueError(f"prefilter_drop_percent must be in [0,100], got {cfg.prefilter_drop_percent}")
+    if float(cfg.prefilter_drop_percent) > 0.0 and cfg.prefilter_metric == "none":
+        cfg.prefilter_metric = "D"
+    if cfg.adv_q_pgd_steps <= 0:
+        raise ValueError(f"adv_q_pgd_steps must be positive, got {cfg.adv_q_pgd_steps}")
+    if cfg.adv_q_pgd_step_size is not None and cfg.adv_q_pgd_step_size <= 0.0:
+        raise ValueError(f"adv_q_pgd_step_size must be positive or None, got {cfg.adv_q_pgd_step_size}")
+    if cfg.logdet_adv_disp_epsilon <= 0.0:
+        raise ValueError(f"logdet_adv_disp_epsilon must be positive, got {cfg.logdet_adv_disp_epsilon}")
+    if cfg.logdet_adv_disp_lambda <= 0.0:
+        raise ValueError(f"logdet_adv_disp_lambda must be positive, got {cfg.logdet_adv_disp_lambda}")
+    if cfg.logdet_adv_disp_pgd_steps <= 0:
+        raise ValueError(f"logdet_adv_disp_pgd_steps must be positive, got {cfg.logdet_adv_disp_pgd_steps}")
+    if cfg.logdet_adv_disp_pgd_step_size is not None and cfg.logdet_adv_disp_pgd_step_size <= 0.0:
+        raise ValueError(
+            "logdet_adv_disp_pgd_step_size must be positive or None, "
+            f"got {cfg.logdet_adv_disp_pgd_step_size}"
+        )
+    if cfg.logdet_adv_disp_score_chunk_size <= 0:
+        raise ValueError(
+            f"logdet_adv_disp_score_chunk_size must be positive, got {cfg.logdet_adv_disp_score_chunk_size}"
+        )
+    if cfg.logdet_adv_disp_jitter <= 0.0:
+        raise ValueError(f"logdet_adv_disp_jitter must be positive, got {cfg.logdet_adv_disp_jitter}")
+    if not (0.0 <= cfg.logdet_adv_disp_percentile <= 1.0):
+        raise ValueError(
+            f"logdet_adv_disp_percentile must be in [0, 1], got {cfg.logdet_adv_disp_percentile}"
+        )
+    if cfg.logdet_adv_disp_swap_max_rounds < 0:
+        raise ValueError(
+            f"logdet_adv_disp_swap_max_rounds must be non-negative, got {cfg.logdet_adv_disp_swap_max_rounds}"
+        )
+    if cfg.logdet_adv_disp_swap_top_unselected < 0:
+        raise ValueError(
+            "logdet_adv_disp_swap_top_unselected must be non-negative "
+            f"(0 means all), got {cfg.logdet_adv_disp_swap_top_unselected}"
+        )
+    if cfg.logdet_adv_disp_swap_top_selected < 0:
+        raise ValueError(
+            "logdet_adv_disp_swap_top_selected must be non-negative "
+            f"(0 means all), got {cfg.logdet_adv_disp_swap_top_selected}"
+        )
+    if cfg.logdet_adv_disp_swap_improvement_tol < 0.0:
+        raise ValueError(
+            "logdet_adv_disp_swap_improvement_tol must be non-negative, "
+            f"got {cfg.logdet_adv_disp_swap_improvement_tol}"
+        )
+    if cfg.logdet_adv_disp_swap_downdate_tol <= 0.0:
+        raise ValueError(
+            "logdet_adv_disp_swap_downdate_tol must be positive, "
+            f"got {cfg.logdet_adv_disp_swap_downdate_tol}"
+        )
+    if cfg.logdet_adv_disp_swap_jitter <= 0.0:
+        raise ValueError(
+            f"logdet_adv_disp_swap_jitter must be positive, got {cfg.logdet_adv_disp_swap_jitter}"
+        )
+    m_adv_q = re.fullmatch(r"adv_q_filter_logdet_([0-9]+)", cfg.acquisition_method.lower())
+    if m_adv_q is not None:
+        pct = int(m_adv_q.group(1))
+        if pct <= 0 or pct > 100:
+            raise ValueError(f"Invalid adv_q_filter_logdet retain suffix: {cfg.acquisition_method}")
+        cfg.acquisition_method = "adv_q_filter_logdet"
+        cfg.retain_fraction = float(pct) / 100.0
+
+    m_adv_grad = re.fullmatch(r"adv_grad_displacement_logdet_p(\d+)", cfg.acquisition_method.lower())
+    if m_adv_grad is not None:
+        pct = int(m_adv_grad.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid adv_grad_displacement_logdet percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = "adv_grad_displacement_logdet"
+        cfg.adv_grad_displacement_percentile = float(pct) / 100.0
+
+    m_secant_prefilter = re.fullmatch(r"ours_secant_logdet_refine_p(\d+)", cfg.acquisition_method.lower())
+    if m_secant_prefilter is not None:
+        pct = int(m_secant_prefilter.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid ours_secant_logdet_refine percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = "ours_secant_logdet_refine"
+        cfg.prefilter_metric = "D"
+        cfg.prefilter_drop_percent = float(pct)
+
+    m = re.fullmatch(
+        r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
+        cfg.acquisition_method.lower(),
+    )
+    if m is not None:
+        pct = int(m.group(2))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid acquisition_method percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = m.group(1)
+        cfg.logdet_adv_disp_percentile = float(pct) / 100.0
+    if (
+        cfg.acquisition_method.lower() == "adv_grad_displacement_logdet"
+        and cfg.logdet_lambda == Config.logdet_lambda
+        and cfg.logdet_adv_disp_lambda != Config.logdet_adv_disp_lambda
+    ):
+        cfg.logdet_lambda = float(cfg.logdet_adv_disp_lambda)
     if cfg.methods is not None:
         cfg.methods = [m.strip().lower() for m in cfg.methods.split(",") if m.strip()]
     cfg = apply_mode_overrides(cfg)

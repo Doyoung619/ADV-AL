@@ -1,0 +1,26 @@
+{
+  "method": "badge",
+  "run_dir": "/data1/doyoung/ADV-AL/experiments/set_ADV_main_resnet18_cifar10/cifar10_resnet18_badge_b100_r20/seed_0",
+  "total_time_sec": 2125.3088725460693,
+  "final_round": {
+    "round": 20,
+    "method": "badge",
+    "labeled_size": 2500,
+    "pool_size": 47500,
+    "acquisition_pool_scored_size": 5000,
+    "clean_acc": 68.84,
+    "fgsm_acc": 56.55,
+    "pgd10_acc": 56.2,
+    "pgd_acc": 56.2,
+    "avg_logit_mismatch": NaN,
+    "mean_grad_disp_score": NaN,
+    "selected_mean_grad_disp_score": NaN,
+    "acquisition_scoring_time_sec": 0.6317386468872428,
+    "selection_time_sec": 0.38403472397476435,
+    "train_time_sec": 150.14510934590362,
+    "eval_time_sec": 9.054242911981419,
+    "round_time_sec": 160.7830819580704
+  },
+  "best_clean_acc": 68.84,
+  "best_pgd_acc": 56.2
+}

@@ -1,0 +1,15 @@
+[
+  {
+    "method": "coreset",
+    "run_dir": "/data1/doyoung/ADV-AL/experiments/set_ADV_main_resnet18_cifar100/cifar100_resnet18_coreset_b100_r20/seed_2",
+    "total_time_sec": 2116.320153421955,
+    "final_round": 20,
+    "final_labeled_size": 2500,
+    "final_clean_acc": 23.06,
+    "final_fgsm_acc": 17.3,
+    "final_pgd_acc": 17.18,
+    "final_avg_logit_mismatch": NaN,
+    "best_clean_acc": 23.06,
+    "best_pgd_acc": 17.18
+  }
+]

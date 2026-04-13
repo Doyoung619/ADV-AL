@@ -1,0 +1,15 @@
+[
+  {
+    "method": "badge",
+    "run_dir": "/data1/doyoung/ADV-AL/experiments/set_ADV_main_resnet18_cifar10/cifar10_resnet18_badge_b100_r20/seed_2",
+    "total_time_sec": 2136.1112547470257,
+    "final_round": 20,
+    "final_labeled_size": 2500,
+    "final_clean_acc": 67.38,
+    "final_fgsm_acc": 54.89,
+    "final_pgd_acc": 54.4,
+    "final_avg_logit_mismatch": NaN,
+    "best_clean_acc": 67.61,
+    "best_pgd_acc": 54.69
+  }
+]
