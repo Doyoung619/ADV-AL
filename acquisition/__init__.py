@@ -114,6 +114,16 @@ def build_acquisition_strategy(name: str, cfg):
         if hasattr(cfg, "prefilter_drop_percent"):
             cfg.prefilter_drop_percent = float(pct)
         name = "ours_secant_logdet_refine"
+    m_secant_clean_prefilter = re.fullmatch(r"ours_secant_logdet_refine_cleanfilter_p(\d+)", name)
+    if m_secant_clean_prefilter is not None:
+        pct = int(m_secant_clean_prefilter.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Unsupported ours_secant_logdet_refine cleanfilter suffix: {name}")
+        if hasattr(cfg, "prefilter_metric"):
+            cfg.prefilter_metric = "clean_grad_norm"
+        if hasattr(cfg, "prefilter_drop_percent"):
+            cfg.prefilter_drop_percent = float(pct)
+        name = "ours_secant_logdet_refine"
     m = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         name,

@@ -272,6 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--acquisition_method",
         "--acq-method",
         "--acq_method",
+        "--method",
         type=str,
         default="badge",
         choices=[
@@ -295,6 +296,11 @@ def build_parser() -> argparse.ArgumentParser:
             "ours_secant_badge",
             "ours_secant_logdet_refine",
             "ours_secant_logdet_refine_p10",
+            "ours_secant_logdet_refine_p25",
+            "ours_secant_logdet_refine_p50",
+            "ours_secant_logdet_refine_cleanfilter_p10",
+            "ours_secant_logdet_refine_cleanfilter_p25",
+            "ours_secant_logdet_refine_cleanfilter_p50",
             "badge_dual_a",
             "badge_dual_b",
             "badge_adv_mult",
@@ -504,7 +510,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="prefilter_metric",
         type=str,
         default="none",
-        help="Optional acquisition prefilter metric. For secant logdet use D for ||phi(x)||.",
+        help=(
+            "Optional acquisition prefilter metric. For secant logdet, D/secant_norm uses ||phi(x)||; "
+            "clean_grad_norm uses ||g_clean(x)|| before the unchanged secant logdet selector."
+        ),
     )
     parser.add_argument(
         "--prefilter-drop-percent",
@@ -747,6 +756,11 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         "ours_secant_badge",
         "ours_secant_logdet_refine",
         "ours_secant_logdet_refine_p10",
+        "ours_secant_logdet_refine_p25",
+        "ours_secant_logdet_refine_p50",
+        "ours_secant_logdet_refine_cleanfilter_p10",
+        "ours_secant_logdet_refine_cleanfilter_p25",
+        "ours_secant_logdet_refine_cleanfilter_p50",
     }:
         raise ValueError(f"epsilon_acq must be positive for {cfg.acquisition_method}, got {cfg.epsilon_acq}")
     if cfg.attack_steps <= 0:
@@ -771,8 +785,13 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         cfg.prefilter_metric = "none"
     elif prefilter_metric_raw in {"d", "secant_norm"}:
         cfg.prefilter_metric = "D"
+    elif prefilter_metric_raw in {"clean_grad_norm", "clean_gradient_norm", "g_clean_norm", "d_clean"}:
+        cfg.prefilter_metric = "clean_grad_norm"
     else:
-        raise ValueError("prefilter_metric must be one of ['none', 'D'], got " f"{cfg.prefilter_metric}")
+        raise ValueError(
+            "prefilter_metric must be one of ['none', 'D', 'clean_grad_norm'], got "
+            f"{cfg.prefilter_metric}"
+        )
     if not (0.0 <= float(cfg.prefilter_drop_percent) <= 100.0):
         raise ValueError(f"prefilter_drop_percent must be in [0,100], got {cfg.prefilter_drop_percent}")
     if float(cfg.prefilter_drop_percent) > 0.0 and cfg.prefilter_metric == "none":
@@ -853,6 +872,18 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
             raise ValueError(f"Invalid ours_secant_logdet_refine percentile: {cfg.acquisition_method}")
         cfg.acquisition_method = "ours_secant_logdet_refine"
         cfg.prefilter_metric = "D"
+        cfg.prefilter_drop_percent = float(pct)
+
+    m_secant_clean_prefilter = re.fullmatch(
+        r"ours_secant_logdet_refine_cleanfilter_p(\d+)",
+        cfg.acquisition_method.lower(),
+    )
+    if m_secant_clean_prefilter is not None:
+        pct = int(m_secant_clean_prefilter.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid ours_secant_logdet_refine cleanfilter percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = "ours_secant_logdet_refine"
+        cfg.prefilter_metric = "clean_grad_norm"
         cfg.prefilter_drop_percent = float(pct)
 
     m = re.fullmatch(
