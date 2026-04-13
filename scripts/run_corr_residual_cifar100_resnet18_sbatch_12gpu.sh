@@ -107,6 +107,7 @@ run_worker() {
     if [[ -f "${status_file}" ]]; then
       continue
     fi
+    mkdir -p "$(dirname "${log_path}")"
     {
       echo "[$(date '+%F %T')] START job=${job_idx} tag=${tag} host=$(hostname) array=${SLURM_ARRAY_TASK_ID:-na} worker=${worker_id} cuda=${CUDA_VISIBLE_DEVICES:-unset}"
       echo "${cmd}"
