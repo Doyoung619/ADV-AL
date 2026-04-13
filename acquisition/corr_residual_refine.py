@@ -304,7 +304,7 @@ def _projector_objective_from_gram(
 ) -> float:
     if len(subset) == 0:
         return 0.0
-    idx = torch.as_tensor(list(subset), dtype=torch.long)
+    idx = torch.as_tensor(list(subset), dtype=torch.long, device=gram.device)
     g = gram.index_select(0, idx).index_select(1, idx).to(dtype=torch.float64)
     c = target_dot.index_select(0, idx).to(dtype=torch.float64)
     g = 0.5 * (g + g.t())
@@ -332,7 +332,8 @@ def _batched_forward_scores(
     eps: float,
 ) -> torch.Tensor:
     n = int(gamma.size(0))
-    scores = torch.full((n,), float("-inf"), dtype=torch.float64)
+    available_mask = available_mask.to(device=gamma.device)
+    scores = torch.full((n,), float("-inf"), dtype=torch.float64, device=gamma.device)
     if n == 0 or not bool(available_mask.any()):
         return scores
     r = residual.to(dtype=gamma.dtype)
@@ -358,7 +359,7 @@ def _top_clean_fallback(
     if count <= 0 or not bool(available_mask.any()):
         return []
     available = torch.nonzero(available_mask, as_tuple=False).flatten().cpu().numpy().astype(np.int64)
-    scores = clean_norms[torch.as_tensor(available, dtype=torch.long)].cpu().numpy()
+    scores = clean_norms[torch.as_tensor(available, dtype=torch.long, device=clean_norms.device)].detach().cpu().numpy()
     order = np.lexsort((available, -scores))
     return available[order[:count]].astype(np.int64).tolist()
 
@@ -370,6 +371,8 @@ def residual_forward_select(
     budget: int,
     score_chunk_size: int = 8192,
     eps: float = 1e-12,
+    progress_logger=None,
+    progress_method_name: str = "CORR_RESIDUAL_FORWARD",
 ) -> Tuple[np.ndarray, torch.Tensor, Dict[str, Any]]:
     if gamma.ndim != 2:
         raise ValueError(f"gamma must be [N,D], got shape={tuple(gamma.shape)}")
@@ -382,7 +385,7 @@ def residual_forward_select(
     budget = min(max(int(budget), 0), n)
     selected: List[int] = []
     q_rows = gamma.new_empty((0, gamma.size(1)), dtype=torch.float64)
-    available = torch.ones((n,), dtype=torch.bool)
+    available = torch.ones((n,), dtype=torch.bool, device=gamma.device)
     gamma_norms = gamma.float().norm(dim=1)
     objectives: List[float] = []
     residual_norms: List[float] = []
@@ -450,6 +453,15 @@ def residual_forward_select(
         rank_updates += int(updated)
         selected_scores.append(best_score)
         objectives.append(_projector_objective_from_basis(q_rows, v_target))
+        if progress_logger is not None and (len(selected) % 10 == 0 or len(selected) == budget):
+            progress_logger.log(
+                (
+                    f"[{progress_method_name}] step={len(selected)}/{budget} "
+                    f"rank={int(q_rows.size(0))} residual_norm={residual_norm:.6f} "
+                    f"score={best_score:.6f} J={objectives[-1]:.6f}"
+                ),
+                device=str(gamma.device),
+            )
 
     return np.asarray(selected, dtype=np.int64), q_rows, {
         "forward_objectives": objectives,
@@ -499,9 +511,9 @@ def refine_by_residual_swaps(
         q_rows = _mgs_basis_rows(gamma[selected], eps=max(eps, 1e-10))
         current_obj = _projector_objective_from_basis(q_rows, v_target)
         selected_set = set(selected)
-        available = torch.ones((n,), dtype=torch.bool)
+        available = torch.ones((n,), dtype=torch.bool, device=gamma.device)
         if selected:
-            available[torch.as_tensor(selected, dtype=torch.long)] = False
+            available[torch.as_tensor(selected, dtype=torch.long, device=gamma.device)] = False
         residual = _residual_from_basis(q_rows, v_target)
         incoming_scores = _batched_forward_scores(
             gamma=gamma,
@@ -630,6 +642,10 @@ class OursCorrResidualRefineStrategy(BaseAcquisition):
         )
         gamma_candidates = gamma[torch.as_tensor(candidate_local, dtype=torch.long)].contiguous()
         clean_norm_candidates = clean_norm[torch.as_tensor(candidate_local, dtype=torch.long)].contiguous()
+        selection_device = device if torch.device(device).type == "cuda" and torch.cuda.is_available() else torch.device("cpu")
+        gamma_for_selection = gamma_candidates.to(device=selection_device, dtype=torch.float32, non_blocking=True)
+        clean_norm_for_selection = clean_norm_candidates.to(device=selection_device, non_blocking=True)
+        v_target_for_selection = v_target.to(device=selection_device, dtype=torch.float64, non_blocking=True)
 
         score_chunk_size = int(getattr(self.cfg, "corr_residual_score_chunk_size", getattr(self.cfg, "logdet_adv_disp_score_chunk_size", 8192)))
         max_refine_rounds = int(getattr(self.cfg, "corr_residual_refine_max_rounds", 3))
@@ -640,21 +656,23 @@ class OursCorrResidualRefineStrategy(BaseAcquisition):
 
         t_select = time.perf_counter()
         picked_forward, q_forward, forward_debug = residual_forward_select(
-            gamma=gamma_candidates,
-            clean_norms=clean_norm_candidates,
-            v_target=v_target,
+            gamma=gamma_for_selection,
+            clean_norms=clean_norm_for_selection,
+            v_target=v_target_for_selection,
             budget=budget,
             score_chunk_size=score_chunk_size,
             eps=eps,
+            progress_logger=progress_logger,
+            progress_method_name="OURS_CORR_RESIDUAL_REFINE_FORWARD",
         )
         forward_time = time.perf_counter() - t_select
 
         t_refine = time.perf_counter()
         picked_refined, refine_debug = refine_by_residual_swaps(
-            gamma=gamma_candidates,
-            clean_norms=clean_norm_candidates,
+            gamma=gamma_for_selection,
+            clean_norms=clean_norm_for_selection,
             selected_local=picked_forward,
-            v_target=v_target,
+            v_target=v_target_for_selection,
             score_chunk_size=score_chunk_size,
             max_rounds=max_refine_rounds,
             incoming_shortlist=incoming_shortlist,
@@ -715,6 +733,7 @@ class OursCorrResidualRefineStrategy(BaseAcquisition):
             "method": self.method_name,
             "objective": "correction_residual_target_projection",
             "selector_mode": "residual_forward_pursuit_plus_swap_refinement",
+            "selection_linalg_device": str(selection_device),
             "gradient_embedding": "last_layer_weight_gradient_no_bias",
             "target_definition": target_debug["target_type"],
             "target_raw_norm": float(target_debug["target_raw_norm"]),
