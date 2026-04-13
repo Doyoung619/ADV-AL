@@ -116,6 +116,7 @@ class Config:
     adv_grad_displacement_filter_basis: str = "clean_grad_norm"
     prefilter_metric: str = "none"
     prefilter_drop_percent: float = 0.0
+    clean_gate_percentile: float = 0.0
     retain_fraction: float = 0.9
     adv_q_attack_type: str = "pgd"
     adv_q_pgd_steps: int = 3
@@ -293,6 +294,10 @@ def build_parser() -> argparse.ArgumentParser:
             "adv_q_filter_logdet_90",
             "adv_q_filter_logdet_75",
             "badge",
+            "ours_corr_residual_refine",
+            "ours_corr_residual_refine_p10",
+            "ours_corr_residual_refine_p25",
+            "ours_corr_residual_refine_p50",
             "ours_secant_badge",
             "ours_secant_logdet_refine",
             "ours_secant_logdet_refine_p10",
@@ -524,6 +529,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Drop the bottom p percent before selection; p10 keeps ceil(0.9*N).",
+    )
+    parser.add_argument(
+        "--clean-gate-percentile",
+        "--clean_gate_percentile",
+        dest="clean_gate_percentile",
+        type=float,
+        default=0.0,
+        help=(
+            "For ours_corr_residual_refine, drop the bottom p percent by "
+            "||g_clean|| before residual correction selection. p=0 keeps all candidates."
+        ),
     )
     parser.add_argument(
         "--retain-fraction",
@@ -761,6 +777,10 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         "ours_secant_logdet_refine_cleanfilter_p10",
         "ours_secant_logdet_refine_cleanfilter_p25",
         "ours_secant_logdet_refine_cleanfilter_p50",
+        "ours_corr_residual_refine",
+        "ours_corr_residual_refine_p10",
+        "ours_corr_residual_refine_p25",
+        "ours_corr_residual_refine_p50",
     }:
         raise ValueError(f"epsilon_acq must be positive for {cfg.acquisition_method}, got {cfg.epsilon_acq}")
     if cfg.attack_steps <= 0:
@@ -794,6 +814,8 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         )
     if not (0.0 <= float(cfg.prefilter_drop_percent) <= 100.0):
         raise ValueError(f"prefilter_drop_percent must be in [0,100], got {cfg.prefilter_drop_percent}")
+    if not (0.0 <= float(cfg.clean_gate_percentile) <= 100.0):
+        raise ValueError(f"clean_gate_percentile must be in [0,100], got {cfg.clean_gate_percentile}")
     if float(cfg.prefilter_drop_percent) > 0.0 and cfg.prefilter_metric == "none":
         cfg.prefilter_metric = "D"
     if cfg.adv_q_pgd_steps <= 0:
@@ -885,6 +907,14 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         cfg.acquisition_method = "ours_secant_logdet_refine"
         cfg.prefilter_metric = "clean_grad_norm"
         cfg.prefilter_drop_percent = float(pct)
+
+    m_corr_residual = re.fullmatch(r"ours_corr_residual_refine_p(\d+)", cfg.acquisition_method.lower())
+    if m_corr_residual is not None:
+        pct = int(m_corr_residual.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid ours_corr_residual_refine clean gate percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = "ours_corr_residual_refine"
+        cfg.clean_gate_percentile = float(pct)
 
     m = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",

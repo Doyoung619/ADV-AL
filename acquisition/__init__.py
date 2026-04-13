@@ -10,6 +10,7 @@ from acquisition.bald_adv_lagrangian import BALDAdvLagrangianStrategy
 from acquisition.bald import BALDStrategy
 from acquisition.batchbald import BatchBALDStrategy
 from acquisition.coreset import CoreSetStrategy
+from acquisition.corr_residual_refine import OursCorrResidualRefineStrategy
 from acquisition.bald_dual_a import BALDDualAStrategy
 from acquisition.bald_dual_b import BALDDualBStrategy
 from acquisition.entropy import EntropyStrategy
@@ -60,6 +61,7 @@ METHOD_REGISTRY = {
     "logdet_adv_feat_swap": LogDetAdvFeatSwapStrategy,
     "logdet_adv_logit_swap": LogDetAdvLogitSwapStrategy,
     "badge": BADGEStrategy,
+    "ours_corr_residual_refine": OursCorrResidualRefineStrategy,
     "ours_secant_badge": OursSecantBADGEStrategy,
     "ours_secant_logdet_refine": OursSecantLogDetRefineStrategy,
     "badge_dual_a": BADGEDualAStrategy,
@@ -124,6 +126,14 @@ def build_acquisition_strategy(name: str, cfg):
         if hasattr(cfg, "prefilter_drop_percent"):
             cfg.prefilter_drop_percent = float(pct)
         name = "ours_secant_logdet_refine"
+    m_corr_residual = re.fullmatch(r"ours_corr_residual_refine_p(\d+)", name)
+    if m_corr_residual is not None:
+        pct = int(m_corr_residual.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Unsupported ours_corr_residual_refine clean gate suffix: {name}")
+        if hasattr(cfg, "clean_gate_percentile"):
+            cfg.clean_gate_percentile = float(pct)
+        name = "ours_corr_residual_refine"
     m = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         name,
