@@ -1,0 +1,2 @@
+best_clean_acc,best_pgd_acc,final_avg_logit_mismatch,final_clean_acc,final_fgsm_acc,final_labeled_size,final_pgd_acc,final_round,method,run_dir,total_time_sec
+20.36,15.54,nan,20.36,15.59,2500,15.54,20,coreset,/data1/doyoung/ADV-AL/experiments/set_ADV_main_moreround_cifar100/cifar100_small_cnn_coreset_p10_b100_r20/seed_4,356.1428617190104

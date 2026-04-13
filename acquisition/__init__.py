@@ -17,6 +17,8 @@ from acquisition.entropy_dual_a import EntropyDualAStrategy
 from acquisition.entropy_dual_b import EntropyDualBStrategy
 from acquisition.saal import SAALStrategy
 from acquisition.saal_dual_b import SAALDualBStrategy
+from acquisition.secant_badge import OursSecantBADGEStrategy
+from acquisition.secant_logdet_refine import OursSecantLogDetRefineStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
 from acquisition.logdet_adv_disp import (
@@ -58,6 +60,8 @@ METHOD_REGISTRY = {
     "logdet_adv_feat_swap": LogDetAdvFeatSwapStrategy,
     "logdet_adv_logit_swap": LogDetAdvLogitSwapStrategy,
     "badge": BADGEStrategy,
+    "ours_secant_badge": OursSecantBADGEStrategy,
+    "ours_secant_logdet_refine": OursSecantLogDetRefineStrategy,
     "badge_dual_a": BADGEDualAStrategy,
     "badge_dual_b": BADGEDualBStrategy,
     "badge_adv_mult": BADGEAdvMultStrategy,
@@ -84,6 +88,14 @@ METHOD_REGISTRY = {
 
 def build_acquisition_strategy(name: str, cfg):
     name = name.lower()
+    m_adv_grad = re.fullmatch(r"adv_grad_displacement_logdet_p(\d+)", name)
+    if m_adv_grad is not None:
+        pct = int(m_adv_grad.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Unsupported adv_grad_displacement_logdet percentile suffix: {name}")
+        if hasattr(cfg, "adv_grad_displacement_percentile"):
+            cfg.adv_grad_displacement_percentile = float(pct) / 100.0
+        name = "adv_grad_displacement_logdet"
     m_adv_q = re.fullmatch(r"adv_q_filter_logdet_([0-9]+)", name)
     if m_adv_q is not None:
         pct = int(m_adv_q.group(1))
@@ -92,6 +104,16 @@ def build_acquisition_strategy(name: str, cfg):
         if hasattr(cfg, "retain_fraction"):
             cfg.retain_fraction = float(pct) / 100.0
         name = "adv_q_filter_logdet"
+    m_secant_prefilter = re.fullmatch(r"ours_secant_logdet_refine_p(\d+)", name)
+    if m_secant_prefilter is not None:
+        pct = int(m_secant_prefilter.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Unsupported ours_secant_logdet_refine percentile suffix: {name}")
+        if hasattr(cfg, "prefilter_metric"):
+            cfg.prefilter_metric = "D"
+        if hasattr(cfg, "prefilter_drop_percent"):
+            cfg.prefilter_drop_percent = float(pct)
+        name = "ours_secant_logdet_refine"
     m = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         name,

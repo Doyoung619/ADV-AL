@@ -112,6 +112,10 @@ class Config:
     attack_random_start: bool = True
     logdet_lambda: float = 1e-3
     adv_grad_displacement_use_explicit_embedding: bool = False
+    adv_grad_displacement_percentile: float = 0.0
+    adv_grad_displacement_filter_basis: str = "clean_grad_norm"
+    prefilter_metric: str = "none"
+    prefilter_drop_percent: float = 0.0
     retain_fraction: float = 0.9
     adv_q_attack_type: str = "pgd"
     adv_q_pgd_steps: int = 3
@@ -280,11 +284,17 @@ def build_parser() -> argparse.ArgumentParser:
             "margin",
             "margin_dual_b",
             "adv_grad_displacement_logdet",
+            "adv_grad_displacement_logdet_p10",
+            "adv_grad_displacement_logdet_p20",
+            "adv_grad_displacement_logdet_p25",
             "adv_q_topk",
             "adv_q_filter_logdet",
             "adv_q_filter_logdet_90",
             "adv_q_filter_logdet_75",
             "badge",
+            "ours_secant_badge",
+            "ours_secant_logdet_refine",
+            "ours_secant_logdet_refine_p10",
             "badge_dual_a",
             "badge_dual_b",
             "badge_adv_mult",
@@ -467,6 +477,45 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     parser.set_defaults(adv_grad_displacement_use_explicit_embedding=False)
+    parser.add_argument(
+        "--adv-grad-displacement-percentile",
+        "--adv_grad_displacement_percentile",
+        dest="adv_grad_displacement_percentile",
+        type=float,
+        default=0.0,
+        help=(
+            "For adv_grad_displacement_logdet, drop the lowest percentile of "
+            "last-layer gradient-norm uncertainty scores before logdet selection."
+        ),
+    )
+    parser.add_argument(
+        "--adv-grad-displacement-filter-basis",
+        "--adv_grad_displacement_filter_basis",
+        dest="adv_grad_displacement_filter_basis",
+        choices=["clean_grad_norm", "adv_grad_norm", "gamma_norm"],
+        default="clean_grad_norm",
+        help="Score used by adv_grad_displacement_logdet percentile filtering.",
+    )
+    parser.add_argument(
+        "--prefilter-metric",
+        "--prefilter_metric",
+        "--uncertainty-filter-metric",
+        "--uncertainty_filter_metric",
+        dest="prefilter_metric",
+        type=str,
+        default="none",
+        help="Optional acquisition prefilter metric. For secant logdet use D for ||phi(x)||.",
+    )
+    parser.add_argument(
+        "--prefilter-drop-percent",
+        "--prefilter_drop_percent",
+        "--uncertainty-filter-percentile",
+        "--uncertainty_filter_percentile",
+        dest="prefilter_drop_percent",
+        type=float,
+        default=0.0,
+        help="Drop the bottom p percent before selection; p10 keeps ceil(0.9*N).",
+    )
     parser.add_argument(
         "--retain-fraction",
         "--retain_fraction",
@@ -692,14 +741,42 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         raise ValueError(f"adv_train_step_size must be positive or None, got {cfg.adv_train_step_size}")
     if not (0.0 < cfg.retain_fraction <= 1.0):
         raise ValueError(f"retain_fraction must be in (0, 1], got {cfg.retain_fraction}")
-    if cfg.epsilon_acq <= 0.0:
-        raise ValueError(f"epsilon_acq must be positive, got {cfg.epsilon_acq}")
+    if cfg.epsilon_acq < 0.0:
+        raise ValueError(f"epsilon_acq must be non-negative, got {cfg.epsilon_acq}")
+    if cfg.epsilon_acq == 0.0 and cfg.acquisition_method.lower() not in {
+        "ours_secant_badge",
+        "ours_secant_logdet_refine",
+        "ours_secant_logdet_refine_p10",
+    }:
+        raise ValueError(f"epsilon_acq must be positive for {cfg.acquisition_method}, got {cfg.epsilon_acq}")
     if cfg.attack_steps <= 0:
         raise ValueError(f"attack_steps must be positive, got {cfg.attack_steps}")
     if cfg.attack_step_size is not None and cfg.attack_step_size <= 0.0:
         raise ValueError(f"attack_step_size must be positive or None, got {cfg.attack_step_size}")
     if cfg.logdet_lambda <= 0.0:
         raise ValueError(f"logdet_lambda must be positive, got {cfg.logdet_lambda}")
+    if not (0.0 <= cfg.adv_grad_displacement_percentile <= 1.0):
+        raise ValueError(
+            "adv_grad_displacement_percentile must be in [0, 1], "
+            f"got {cfg.adv_grad_displacement_percentile}"
+        )
+    if cfg.adv_grad_displacement_filter_basis not in {"clean_grad_norm", "adv_grad_norm", "gamma_norm"}:
+        raise ValueError(
+            "adv_grad_displacement_filter_basis must be one of "
+            "['clean_grad_norm', 'adv_grad_norm', 'gamma_norm'], "
+            f"got {cfg.adv_grad_displacement_filter_basis}"
+        )
+    prefilter_metric_raw = str(cfg.prefilter_metric).lower()
+    if prefilter_metric_raw in {"", "none", "off", "false"}:
+        cfg.prefilter_metric = "none"
+    elif prefilter_metric_raw in {"d", "secant_norm"}:
+        cfg.prefilter_metric = "D"
+    else:
+        raise ValueError("prefilter_metric must be one of ['none', 'D'], got " f"{cfg.prefilter_metric}")
+    if not (0.0 <= float(cfg.prefilter_drop_percent) <= 100.0):
+        raise ValueError(f"prefilter_drop_percent must be in [0,100], got {cfg.prefilter_drop_percent}")
+    if float(cfg.prefilter_drop_percent) > 0.0 and cfg.prefilter_metric == "none":
+        cfg.prefilter_metric = "D"
     if cfg.adv_q_pgd_steps <= 0:
         raise ValueError(f"adv_q_pgd_steps must be positive, got {cfg.adv_q_pgd_steps}")
     if cfg.adv_q_pgd_step_size is not None and cfg.adv_q_pgd_step_size <= 0.0:
@@ -760,6 +837,23 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
             raise ValueError(f"Invalid adv_q_filter_logdet retain suffix: {cfg.acquisition_method}")
         cfg.acquisition_method = "adv_q_filter_logdet"
         cfg.retain_fraction = float(pct) / 100.0
+
+    m_adv_grad = re.fullmatch(r"adv_grad_displacement_logdet_p(\d+)", cfg.acquisition_method.lower())
+    if m_adv_grad is not None:
+        pct = int(m_adv_grad.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid adv_grad_displacement_logdet percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = "adv_grad_displacement_logdet"
+        cfg.adv_grad_displacement_percentile = float(pct) / 100.0
+
+    m_secant_prefilter = re.fullmatch(r"ours_secant_logdet_refine_p(\d+)", cfg.acquisition_method.lower())
+    if m_secant_prefilter is not None:
+        pct = int(m_secant_prefilter.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid ours_secant_logdet_refine percentile: {cfg.acquisition_method}")
+        cfg.acquisition_method = "ours_secant_logdet_refine"
+        cfg.prefilter_metric = "D"
+        cfg.prefilter_drop_percent = float(pct)
 
     m = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",

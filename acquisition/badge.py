@@ -9,6 +9,28 @@ import torch.nn.functional as F
 from acquisition.utils import AcquisitionOutput, BaseAcquisition
 
 
+def last_layer_gradient_embedding_from_logits_features(
+    logits: torch.Tensor,
+    features: torch.Tensor,
+    pseudo_labels: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Analytic BADGE last-layer weight-gradient embedding.
+
+    If h(x) has shape [D], p(x) has shape [C], and y_hat is the
+    pseudo-label, the embedding is concat_c ((p_c - 1[c=y_hat]) * h(x)).
+    This intentionally omits classifier bias terms, matching the existing
+    BADGE implementation.
+    """
+    probs = F.softmax(logits, dim=1)
+    if pseudo_labels is None:
+        pseudo_labels = probs.argmax(dim=1)
+    one_hot = F.one_hot(pseudo_labels, num_classes=probs.size(1)).to(dtype=probs.dtype)
+    coeff = probs - one_hot
+    grad_embed = coeff.unsqueeze(2) * features.unsqueeze(1)
+    return grad_embed.reshape(grad_embed.size(0), -1)
+
+
 @torch.no_grad()
 def compute_badge_embeddings(
     model,
@@ -36,15 +58,7 @@ def compute_badge_embeddings(
     for batch_idx, (images, _, _) in enumerate(unlabeled_loader, start=1):
         images = images.to(device, non_blocking=True)
         logits, features = model(images, return_features=True)  # logits [B,C], features [B,D]
-        probs = F.softmax(logits, dim=1)  # [B,C]
-        y_hat = probs.argmax(dim=1)  # [B]
-
-        one_hot = F.one_hot(y_hat, num_classes=probs.size(1)).float()  # [B,C]
-        coeff = probs - one_hot  # [B,C]
-
-        # [B, C, D]: per-class last-layer gradient block
-        grad_embed = coeff.unsqueeze(2) * features.unsqueeze(1)
-        grad_embed = grad_embed.reshape(grad_embed.size(0), -1)  # [B, C*D]
+        grad_embed = last_layer_gradient_embedding_from_logits_features(logits, features)
 
         if projection_dim > 0 and projection_dim < grad_embed.size(1):
             if proj is None:

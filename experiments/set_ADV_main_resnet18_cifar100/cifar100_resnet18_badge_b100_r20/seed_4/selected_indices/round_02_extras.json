@@ -1,0 +1,5 @@
+{
+  "embedding_dim": 51200,
+  "projection_dim": 0,
+  "candidate_cap": null
+}

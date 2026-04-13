@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from acquisition import build_acquisition_strategy
 from acquisition.logdet_adv_disp import (
     AdvGradDisplacementLogDetStrategy,
     build_adv_gradient_displacement_gram,
@@ -45,6 +46,8 @@ def _cfg() -> SimpleNamespace:
         logdet_adv_disp_score_chunk_size=4,
         logdet_adv_disp_jitter=1e-8,
         adv_grad_displacement_use_explicit_embedding=False,
+        adv_grad_displacement_percentile=0.0,
+        adv_grad_displacement_filter_basis="clean_grad_norm",
         debug_save_adv_scores=False,
     )
 
@@ -105,6 +108,22 @@ def main() -> None:
     assert out1.extras["validation"]["gram_symmetric"]
     assert out1.extras["validation"]["selected_unique"]
     assert out1.extras["validation"]["selected_count_matches_budget"]
+
+    cfg_filtered = _cfg()
+    cfg_filtered.acquisition_method = "adv_grad_displacement_logdet_p25"
+    filtered_strategy = build_acquisition_strategy(cfg_filtered.acquisition_method, cfg_filtered)
+    out_filtered = filtered_strategy.select(
+        model=model,
+        unlabeled_loader=loader,
+        labeled_loader=None,
+        unlabeled_indices=indices.numpy(),
+        budget=4,
+        device=device,
+    )
+    assert abs(float(cfg_filtered.adv_grad_displacement_percentile) - 0.25) < 1e-12
+    assert len(out_filtered.selected_indices) == 4
+    assert out_filtered.extras["uncertainty_filter_basis"] == "clean_grad_norm"
+    assert out_filtered.extras["retained_pool_size"] == 9
     print("smoke_test_adv_grad_displacement_logdet: ok")
     print("selected_indices:", out1.selected_indices.tolist())
     print("selector_mode:", out1.extras["selector_mode"])

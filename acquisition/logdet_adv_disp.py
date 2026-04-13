@@ -1165,6 +1165,77 @@ def build_adv_gradient_displacement_gram(
     return gram
 
 
+def adv_gradient_last_layer_norm_sq(
+    components: Dict[str, torch.Tensor],
+    basis: str = "clean_grad_norm",
+) -> torch.Tensor:
+    """
+    Return per-sample squared L2 norms for last-layer gradient embeddings.
+
+    clean_grad_norm: ||vec((p_clean - e_yhat) h_clean^T)||_2^2
+    adv_grad_norm:   ||vec((p_adv   - e_yhat) h_adv^T)||_2^2
+    gamma_norm:      ||g_adv - g_clean||_2^2
+    """
+    basis = str(basis).lower()
+    if basis not in {"clean_grad_norm", "adv_grad_norm", "gamma_norm"}:
+        raise ValueError(
+            "basis must be one of ['clean_grad_norm', 'adv_grad_norm', 'gamma_norm'], "
+            f"got {basis}"
+        )
+    a_clean = components["a_clean"].to(dtype=torch.float32)
+    a_adv = components["a_adv"].to(dtype=torch.float32)
+    h_clean = components["clean_features"].to(dtype=torch.float32)
+    h_adv = components["adv_features"].to(dtype=torch.float32)
+
+    clean_norm_sq = a_clean.pow(2).sum(dim=1) * h_clean.pow(2).sum(dim=1)
+    if basis == "clean_grad_norm":
+        return clean_norm_sq.clamp_min(0.0)
+
+    adv_norm_sq = a_adv.pow(2).sum(dim=1) * h_adv.pow(2).sum(dim=1)
+    if basis == "adv_grad_norm":
+        return adv_norm_sq.clamp_min(0.0)
+
+    cross = (a_adv * a_clean).sum(dim=1) * (h_adv * h_clean).sum(dim=1)
+    return (adv_norm_sq + clean_norm_sq - 2.0 * cross).clamp_min(0.0)
+
+
+def top_retained_local_by_low_percentile_cut(
+    scores: torch.Tensor,
+    percentile: float,
+    min_keep: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Drop the lowest percentile of scores and return retained local rows."""
+    if not (0.0 <= float(percentile) <= 1.0):
+        raise ValueError(f"percentile must be in [0, 1], got {percentile}")
+    n = int(scores.numel())
+    if n == 0:
+        return torch.empty((0,), dtype=torch.long, device=scores.device), torch.tensor(
+            float("-inf"), dtype=torch.float32, device=scores.device
+        )
+    if float(percentile) <= 0.0:
+        return torch.arange(n, dtype=torch.long, device=scores.device), torch.tensor(
+            float("-inf"), dtype=torch.float32, device=scores.device
+        )
+
+    keep_k = int(math.ceil((1.0 - float(percentile)) * float(n)))
+    keep_k = max(int(min_keep), keep_k)
+    keep_k = max(1, min(keep_k, n))
+    finite_scores = torch.where(torch.isfinite(scores), scores, torch.full_like(scores, -torch.inf))
+    retained_scores, retained_local = torch.topk(finite_scores, k=keep_k, largest=True)
+    threshold = retained_scores.min() if retained_scores.numel() > 0 else torch.tensor(
+        float("-inf"), dtype=torch.float32, device=scores.device
+    )
+    return retained_local.sort().values, threshold
+
+
+def subset_adv_gradient_components(
+    components: Dict[str, torch.Tensor],
+    local_indices: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    local_cpu = local_indices.detach().cpu().to(dtype=torch.long)
+    return {key: value[local_cpu] for key, value in components.items()}
+
+
 def _kernel_quadratic_scores(
     kernel: torch.Tensor,
     diag: torch.Tensor,
@@ -2000,6 +2071,8 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
         score_chunk_size = int(getattr(self.cfg, "logdet_adv_disp_score_chunk_size", 8192))
         jitter = float(getattr(self.cfg, "logdet_adv_disp_jitter", 1e-8))
         use_explicit = bool(getattr(self.cfg, "adv_grad_displacement_use_explicit_embedding", False))
+        filter_percentile = float(getattr(self.cfg, "adv_grad_displacement_percentile", 0.0))
+        filter_basis = str(getattr(self.cfg, "adv_grad_displacement_filter_basis", "clean_grad_norm")).lower()
 
         t_score = time.perf_counter()
         components = compute_adv_gradient_displacement_components(
@@ -2020,18 +2093,33 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
         adv_logits = components["adv_logits"]
         clean_features = components["clean_features"]
         adv_features = components["adv_features"]
-        n = int(clean_logits.size(0))
-        c = int(components["a_clean"].size(1)) if n > 0 else 0
-        d = int(clean_features.size(1)) if n > 0 else 0
+        full_n = int(clean_logits.size(0))
+        c = int(components["a_clean"].size(1)) if full_n > 0 else 0
+        d = int(clean_features.size(1)) if full_n > 0 else 0
         ambient_dim = int(c * d)
 
-        z_disp_norm = (adv_logits - clean_logits).norm(dim=1) if n > 0 else torch.empty((0,), dtype=torch.float32)
-        h_disp_norm = (adv_features - clean_features).norm(dim=1) if n > 0 else torch.empty((0,), dtype=torch.float32)
+        z_disp_norm = (adv_logits - clean_logits).norm(dim=1) if full_n > 0 else torch.empty((0,), dtype=torch.float32)
+        h_disp_norm = (adv_features - clean_features).norm(dim=1) if full_n > 0 else torch.empty((0,), dtype=torch.float32)
         z_disp_stats = tensor_stats(z_disp_norm)
         h_disp_stats = tensor_stats(h_disp_norm)
+        full_gamma_norm_sq = adv_gradient_last_layer_norm_sq(components, basis="gamma_norm")
+        filter_score_sq = adv_gradient_last_layer_norm_sq(components, basis=filter_basis)
+        filter_scores = filter_score_sq.clamp_min(0.0).sqrt()
+        retained_local, filter_threshold = top_retained_local_by_low_percentile_cut(
+            scores=filter_scores,
+            percentile=filter_percentile,
+            min_keep=min(int(budget), full_n) if full_n > 0 else 0,
+        )
+        components_for_selection = subset_adv_gradient_components(components, retained_local)
+        n = int(components_for_selection["clean_logits"].size(0))
+        retained_filter_scores = filter_scores[retained_local] if retained_local.numel() > 0 else torch.empty((0,))
+        retained_gamma_norm_sq = full_gamma_norm_sq[retained_local] if retained_local.numel() > 0 else torch.empty((0,))
+        filter_score_stats = tensor_stats(filter_scores)
+        retained_filter_score_stats = tensor_stats(retained_filter_scores)
+        retained_gamma_norm_stats = tensor_stats(retained_gamma_norm_sq.clamp_min(0.0).sqrt())
 
         if use_explicit:
-            embeddings = build_adv_gradient_displacement_explicit_embeddings(components).to(device=device)
+            embeddings = build_adv_gradient_displacement_explicit_embeddings(components_for_selection).to(device=device)
             gamma_norm_sq = embeddings.pow(2).sum(dim=1).detach().cpu()
             scoring_time = time.perf_counter() - t_score
             t_select = time.perf_counter()
@@ -2059,7 +2147,7 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
             }
         else:
             kernel = build_adv_gradient_displacement_gram(
-                components=components,
+                components=components_for_selection,
                 device=device,
                 score_chunk_size=score_chunk_size,
             )
@@ -2092,7 +2180,10 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
                 "kernel_contains_finite": bool(torch.isfinite(kernel).all().item()) if kernel.numel() > 0 else True,
             }
 
-        selected = unlabeled_indices[picked_local]
+        picked_local_t = torch.as_tensor(picked_local, device=retained_local.device, dtype=torch.long)
+        picked_local_global_t = retained_local[picked_local_t]
+        picked_local_global = picked_local_global_t.detach().cpu().numpy()
+        selected = unlabeled_indices[picked_local_global]
         if len(np.unique(picked_local)) != len(picked_local):
             raise ValueError("adv_grad_displacement_logdet selected duplicate local indices")
         if len(selected) != min(int(budget), int(n)):
@@ -2101,9 +2192,9 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
                 f"got {len(selected)}, expected {min(int(budget), int(n))}"
             )
 
-        gamma_norm = gamma_norm_sq.clamp_min(0.0).sqrt()
+        gamma_norm = full_gamma_norm_sq.clamp_min(0.0).sqrt()
         gamma_norm_stats = tensor_stats(gamma_norm)
-        selected_gamma_norm = gamma_norm[torch.as_tensor(picked_local, dtype=torch.long)] if len(picked_local) > 0 else torch.empty((0,))
+        selected_gamma_norm = gamma_norm[picked_local_global_t.cpu()] if len(picked_local_global) > 0 else torch.empty((0,))
         selected_gamma_norm_stats = tensor_stats(selected_gamma_norm)
 
         if selected_kernel.numel() > 0:
@@ -2128,6 +2219,17 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
             )
             progress_logger.log(
                 (
+                    f"[{self.log_prefix}] uncertainty_filter "
+                    f"basis={filter_basis} percentile={filter_percentile:.3f} "
+                    f"retained={int(retained_local.numel())}/{int(len(unlabeled_indices))} "
+                    f"threshold={float(filter_threshold.item()) if torch.isfinite(filter_threshold) else float('-inf'):.6f} "
+                    f"score_mean={filter_score_stats['mean']:.6f} "
+                    f"retained_score_mean={retained_filter_score_stats['mean']:.6f}"
+                ),
+                device=str(device),
+            )
+            progress_logger.log(
+                (
                     f"[{self.log_prefix}] selected_stats "
                     f"selected={int(len(selected))} mode={selector_mode} "
                     f"logdet_obj={float(select_debug.get('final_logdet_objective', float('nan'))):.6f} "
@@ -2146,7 +2248,9 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
             )
 
         selected_flag = np.zeros(len(unlabeled_indices), dtype=np.int64)
-        selected_flag[picked_local] = 1
+        selected_flag[picked_local_global] = 1
+        retained_flag = np.zeros(len(unlabeled_indices), dtype=np.int64)
+        retained_flag[retained_local.detach().cpu().numpy()] = 1
         debug_data = None
         if bool(getattr(self.cfg, "debug_save_adv_scores", False)):
             debug_data = {
@@ -2156,19 +2260,23 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
                     "z_disp_norm",
                     "h_disp_norm",
                     "gamma_norm",
+                    "uncertainty_filter_score",
+                    "retained_flag",
                     "selected_flag",
                 ],
                 "index": np.asarray(unlabeled_indices, dtype=np.int64),
                 "z_disp_norm": z_disp_norm.detach().cpu().numpy(),
                 "h_disp_norm": h_disp_norm.detach().cpu().numpy(),
                 "gamma_norm": gamma_norm.detach().cpu().numpy(),
+                "uncertainty_filter_score": filter_scores.detach().cpu().numpy(),
+                "retained_flag": retained_flag,
                 "selected_flag": selected_flag,
             }
 
         total_time = time.perf_counter() - total_t0
         return AcquisitionOutput(
             selected_indices=selected.astype(np.int64),
-            scores=gamma_norm_sq.detach().cpu().numpy(),
+            scores=full_gamma_norm_sq.detach().cpu().numpy(),
             scoring_time_sec=float(scoring_time),
             selection_time_sec=float(selection_time),
             extras={
@@ -2183,8 +2291,17 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
                 "num_classes": int(c),
                 "feature_dim": int(d),
                 "pool_size": int(len(unlabeled_indices)),
+                "retained_pool_size": int(retained_local.numel()),
                 "selected_size": int(len(selected)),
                 "selected_indices": selected.astype(np.int64).tolist(),
+                "uncertainty_filter_percentile": float(filter_percentile),
+                "uncertainty_filter_basis": str(filter_basis),
+                "uncertainty_filter_threshold": (
+                    float(filter_threshold.item()) if torch.isfinite(filter_threshold) else float("-inf")
+                ),
+                "uncertainty_filter_score_stats": filter_score_stats,
+                "retained_uncertainty_filter_score_stats": retained_filter_score_stats,
+                "retained_gamma_norm_stats": retained_gamma_norm_stats,
                 "epsilon_acq": float(eps_acq),
                 "attack_norm": "linf",
                 "attack_objective": "squared_logit_displacement",
@@ -2201,7 +2318,9 @@ class AdvGradDisplacementLogDetStrategy(BaseAcquisition):
                 "selected_gamma_norm_stats": selected_gamma_norm_stats,
                 "selected_kernel_stats": selected_kernel_stats,
                 "selected_kernel_offdiag_stats": selected_kernel_offdiag_stats,
-                "mean_grad_disp_score": float(gamma_norm_sq.mean().item()) if gamma_norm_sq.numel() > 0 else float("nan"),
+                "mean_grad_disp_score": (
+                    float(full_gamma_norm_sq.mean().item()) if full_gamma_norm_sq.numel() > 0 else float("nan")
+                ),
                 "selected_mean_grad_disp_score": (
                     float(selected_gamma_norm.pow(2).mean().item()) if selected_gamma_norm.numel() > 0 else float("nan")
                 ),

@@ -31,6 +31,8 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "adv_grad_displacement_logdet",
         "adv_q_topk",
         "adv_q_filter_logdet",
+        "ours_secant_badge",
+        "ours_secant_logdet_refine",
         "logdet_adv_disp",
         "logdet_adv_disp_swap",
         "semantic_logdet",
@@ -41,6 +43,19 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "logdet_adv_logit_swap",
     }:
         return m, {}
+    mm_adv_grad = re.fullmatch(r"adv_grad_displacement_logdet_p(\d+)", m)
+    if mm_adv_grad is not None:
+        pct = int(mm_adv_grad.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid percentile in method name: {method_name}")
+        percentile = f"{pct / 100.0:.4f}".rstrip("0").rstrip(".")
+        return "adv_grad_displacement_logdet", {"adv_grad_displacement_percentile": percentile}
+    mm_secant_prefilter = re.fullmatch(r"ours_secant_logdet_refine_p(\d+)", m)
+    if mm_secant_prefilter is not None:
+        pct = int(mm_secant_prefilter.group(1))
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid percentile in method name: {method_name}")
+        return "ours_secant_logdet_refine", {"prefilter_metric": "D", "prefilter_drop_percent": str(pct)}
     mm_logdet = re.fullmatch(
         r"((?:logdet_adv_disp|semantic_logdet|adv_displacement_logdet)(?:_swap)?|logdet_adv_feat_swap|logdet_adv_logit_swap)_p(\d+)",
         m,
