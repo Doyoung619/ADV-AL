@@ -299,6 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
             "ours_corr_residual_refine_p25",
             "ours_corr_residual_refine_p50",
             "ours_secant_badge",
+            "ours_badge_secant",
+            "ours_badge_jointadv",
             "ours_secant_logdet_refine",
             "ours_secant_logdet_refine_p10",
             "ours_secant_logdet_refine_p25",
@@ -517,7 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help=(
             "Optional acquisition prefilter metric. For secant logdet, D/secant_norm uses ||phi(x)||; "
-            "clean_grad_norm uses ||g_clean(x)|| before the unchanged secant logdet selector."
+            "clean_grad_norm uses ||g_clean(x)|| before the unchanged secant logdet selector. "
+            "For robust BADGE, use secant_clean_grad_norm with ours_badge_secant and "
+            "joint_embedding_norm with ours_badge_jointadv."
         ),
     )
     parser.add_argument(
@@ -770,6 +774,8 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         raise ValueError(f"epsilon_acq must be non-negative, got {cfg.epsilon_acq}")
     if cfg.epsilon_acq == 0.0 and cfg.acquisition_method.lower() not in {
         "ours_secant_badge",
+        "ours_badge_secant",
+        "ours_badge_jointadv",
         "ours_secant_logdet_refine",
         "ours_secant_logdet_refine_p10",
         "ours_secant_logdet_refine_p25",
@@ -807,9 +813,14 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
         cfg.prefilter_metric = "D"
     elif prefilter_metric_raw in {"clean_grad_norm", "clean_gradient_norm", "g_clean_norm", "d_clean"}:
         cfg.prefilter_metric = "clean_grad_norm"
+    elif prefilter_metric_raw in {"secant_clean_grad_norm", "secant_clean_gradient_norm"}:
+        cfg.prefilter_metric = "secant_clean_grad_norm"
+    elif prefilter_metric_raw in {"joint_embedding_norm", "joint_norm", "jointadv_norm", "psi_jointadv_norm"}:
+        cfg.prefilter_metric = "joint_embedding_norm"
     else:
         raise ValueError(
-            "prefilter_metric must be one of ['none', 'D', 'clean_grad_norm'], got "
+            "prefilter_metric must be one of "
+            "['none', 'D', 'clean_grad_norm', 'secant_clean_grad_norm', 'joint_embedding_norm'], got "
             f"{cfg.prefilter_metric}"
         )
     if not (0.0 <= float(cfg.prefilter_drop_percent) <= 100.0):
@@ -817,7 +828,13 @@ def parse_config(argv: Optional[List[str]] = None) -> Config:
     if not (0.0 <= float(cfg.clean_gate_percentile) <= 100.0):
         raise ValueError(f"clean_gate_percentile must be in [0,100], got {cfg.clean_gate_percentile}")
     if float(cfg.prefilter_drop_percent) > 0.0 and cfg.prefilter_metric == "none":
-        cfg.prefilter_metric = "D"
+        robust_badge_method = cfg.acquisition_method.lower()
+        if robust_badge_method in {"ours_secant_badge", "ours_badge_secant"}:
+            cfg.prefilter_metric = "secant_clean_grad_norm"
+        elif robust_badge_method == "ours_badge_jointadv":
+            cfg.prefilter_metric = "joint_embedding_norm"
+        else:
+            cfg.prefilter_metric = "D"
     if cfg.adv_q_pgd_steps <= 0:
         raise ValueError(f"adv_q_pgd_steps must be positive, got {cfg.adv_q_pgd_steps}")
     if cfg.adv_q_pgd_step_size is not None and cfg.adv_q_pgd_step_size <= 0.0:

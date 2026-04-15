@@ -140,6 +140,19 @@ def _pick_gpu(gpu_ids: List[int], running_by_gpu: Dict[int, int], jobs_per_gpu: 
     return int(candidates[0])
 
 
+def _gpu_ids_from_env() -> List[int]:
+    raw = os.environ.get("GPU_IDS", "").strip()
+    if raw == "":
+        return []
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part == "":
+            continue
+        out.append(int(part))
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Automatic multi-GPU launcher for one experiment set.")
     parser.add_argument("--set-root", type=str, required=True)
@@ -154,7 +167,7 @@ def main():
         print(f"[launch] no commands found: {commands_path}")
         return
 
-    gpu_ids = discover_gpu_ids()
+    gpu_ids = _gpu_ids_from_env() or discover_gpu_ids()
     if len(gpu_ids) == 0:
         gpu_ids = [0]
     jobs_per_gpu = max(1, int(args.jobs_per_gpu))

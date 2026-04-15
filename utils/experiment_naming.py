@@ -32,6 +32,8 @@ def canonical_method_to_cli(method_name: str) -> Tuple[str, Dict[str, str]]:
         "adv_q_topk",
         "adv_q_filter_logdet",
         "ours_secant_badge",
+        "ours_badge_secant",
+        "ours_badge_jointadv",
         "ours_secant_logdet_refine",
         "logdet_adv_disp",
         "logdet_adv_disp_swap",

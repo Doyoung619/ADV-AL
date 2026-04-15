@@ -18,7 +18,7 @@ from acquisition.entropy_dual_a import EntropyDualAStrategy
 from acquisition.entropy_dual_b import EntropyDualBStrategy
 from acquisition.saal import SAALStrategy
 from acquisition.saal_dual_b import SAALDualBStrategy
-from acquisition.secant_badge import OursSecantBADGEStrategy
+from acquisition.secant_badge import OursBadgeJointAdvStrategy, OursBadgeSecantStrategy, OursSecantBADGEStrategy
 from acquisition.secant_logdet_refine import OursSecantLogDetRefineStrategy
 from acquisition.margin import MarginStrategy
 from acquisition.margin_dual_b import MarginDualBStrategy
@@ -63,6 +63,8 @@ METHOD_REGISTRY = {
     "badge": BADGEStrategy,
     "ours_corr_residual_refine": OursCorrResidualRefineStrategy,
     "ours_secant_badge": OursSecantBADGEStrategy,
+    "ours_badge_secant": OursBadgeSecantStrategy,
+    "ours_badge_jointadv": OursBadgeJointAdvStrategy,
     "ours_secant_logdet_refine": OursSecantLogDetRefineStrategy,
     "badge_dual_a": BADGEDualAStrategy,
     "badge_dual_b": BADGEDualBStrategy,
