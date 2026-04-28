@@ -1,5 +1,9 @@
-﻿# Data / experiment outputs
+# Experiment outputs (excluded from repo)
+experiments/
+
+# Data / experiment outputs
 data/
+Empirical/data/
 output_Experiment1/
 output_Experiment2/
 

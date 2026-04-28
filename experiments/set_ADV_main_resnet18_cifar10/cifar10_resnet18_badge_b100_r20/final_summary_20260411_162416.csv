@@ -1,2 +1,0 @@
-best_clean_acc,best_pgd_acc,final_avg_logit_mismatch,final_clean_acc,final_fgsm_acc,final_labeled_size,final_pgd_acc,final_round,method,run_dir,total_time_sec
-68.47,55.5,nan,68.47,55.87,2500,55.5,20,badge,/data1/doyoung/ADV-AL/experiments/set_ADV_main_resnet18_cifar10/cifar10_resnet18_badge_b100_r20/seed_4,2109.8342962069437
