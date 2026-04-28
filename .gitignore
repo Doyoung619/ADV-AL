@@ -1,5 +1,7 @@
 # Experiment outputs (excluded from repo)
 experiments/
+Theoretical/results/
+results/
 
 # Data / experiment outputs
 data/
