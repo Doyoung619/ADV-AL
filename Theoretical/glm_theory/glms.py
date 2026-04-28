@@ -27,6 +27,8 @@ import numpy as np
 
 
 _POISSON_ETA_CLAMP = 5.0
+_EXPGAMMA_ETA_CLAMP = 5.0
+_EXPGAMMA_EXP_CLAMP = 100.0  # max value of exp(eta) in Hessian / loss to prevent overflow
 
 
 def _outer(x: np.ndarray) -> np.ndarray:
@@ -36,6 +38,7 @@ def _outer(x: np.ndarray) -> np.ndarray:
 class BaseGLM:
     name: str = "base"
     is_classification: bool = False
+    x_scale: float = 1.0  # subclasses override (e.g. 0.5 for exp/gamma stability)
 
     def __init__(self, d: int, C: int = 1, sigma: float = 1.0,
                  ridge: float = 1e-4, w_scale: float = 1.0):
@@ -58,8 +61,7 @@ class BaseGLM:
         return w
 
     def sample_X(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        X = rng.normal(size=(n, self.d))
-        # mild standardization (already roughly N(0,1)); keeps Poisson stable.
+        X = rng.normal(size=(n, self.d)) * self.x_scale
         return X
 
     def sample_Y(self, X: np.ndarray, w_star: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -71,7 +73,11 @@ class BaseGLM:
     def gradient_theta(self, theta: np.ndarray, x: np.ndarray, y) -> np.ndarray:
         raise NotImplementedError
 
-    def hessian_theta(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+    def hessian_theta(self, theta: np.ndarray, x: np.ndarray, y=None) -> np.ndarray:
+        """Per-sample Hessian. ``y`` is ignored for GLMs whose Hessian is y-free
+        (gaussian/logistic/softmax/poisson); required for exponential/gamma where the
+        observed Hessian depends on y. When ``y is None`` for those families, falls back
+        to the model's plug-in mean (Fisher information)."""
         raise NotImplementedError
 
     def gradient_x(self, theta: np.ndarray, x: np.ndarray, y) -> np.ndarray:
@@ -84,11 +90,13 @@ class BaseGLM:
             out[i] = self.gradient_theta(theta, x, y_i)
         return out
 
-    def average_hessian(self, theta: np.ndarray, X: np.ndarray) -> np.ndarray:
+    def average_hessian(self, theta: np.ndarray, X: np.ndarray,
+                        y: Optional[np.ndarray] = None) -> np.ndarray:
         H = np.zeros((self.param_dim, self.param_dim))
         n = X.shape[0]
-        for x in X:
-            H += self.hessian_theta(theta, x)
+        for i, x in enumerate(X):
+            y_i = None if y is None else y[i]
+            H += self.hessian_theta(theta, x, y_i)
         return H / max(n, 1)
 
     def predict(self, theta: np.ndarray, X: np.ndarray) -> np.ndarray:
@@ -107,11 +115,13 @@ class BaseGLM:
         I = np.eye(self.param_dim)
         for _ in range(n_steps):
             G = self.batch_gradient(theta, X, y).mean(axis=0)
-            H = self.average_hessian(theta, X) + self.ridge * I
+            H = self.average_hessian(theta, X, y) + self.ridge * I
             try:
                 step = np.linalg.solve(H, G)
             except np.linalg.LinAlgError:
                 step = np.linalg.lstsq(H, G, rcond=None)[0]
+            if not np.all(np.isfinite(step)):
+                break
             theta = theta - step
             if np.linalg.norm(step) < tol:
                 break
@@ -141,7 +151,7 @@ class GaussianGLM(BaseGLM):
         r = float(theta @ x - y)
         return (r / self.sigma ** 2) * x
 
-    def hessian_theta(self, theta, x):
+    def hessian_theta(self, theta, x, y=None):
         return (1.0 / self.sigma ** 2) * _outer(x)
 
     def gradient_x(self, theta, x, y):
@@ -152,7 +162,7 @@ class GaussianGLM(BaseGLM):
         r = X @ theta - y
         return (r / self.sigma ** 2)[:, None] * X
 
-    def average_hessian(self, theta, X):
+    def average_hessian(self, theta, X, y=None):
         n = max(X.shape[0], 1)
         return (X.T @ X) / (n * self.sigma ** 2)
 
@@ -196,7 +206,7 @@ class LogisticGLM(BaseGLM):
         p = float(self._sigmoid(theta @ x))
         return (p - float(y)) * x
 
-    def hessian_theta(self, theta, x):
+    def hessian_theta(self, theta, x, y=None):
         p = float(self._sigmoid(theta @ x))
         return p * (1 - p) * _outer(x)
 
@@ -208,7 +218,7 @@ class LogisticGLM(BaseGLM):
         p = self._sigmoid(X @ theta)
         return (p - y)[:, None] * X
 
-    def average_hessian(self, theta, X):
+    def average_hessian(self, theta, X, y=None):
         p = self._sigmoid(X @ theta)
         w = p * (1 - p)  # (n,)
         # H = (1/n) X^T diag(w) X
@@ -276,7 +286,7 @@ class SoftmaxGLM(BaseGLM):
         e[int(y)] = 1.0
         return np.outer(p - e, x).reshape(-1)
 
-    def hessian_theta(self, theta, x):
+    def hessian_theta(self, theta, x, y=None):
         W = self._W(theta)
         p = self._softmax((x @ W.T).reshape(1, -1)).reshape(-1)
         A = np.diag(p) - np.outer(p, p)
@@ -299,7 +309,7 @@ class SoftmaxGLM(BaseGLM):
         # gradient[i, c*d+j] = diff[i, c] * X[i, j]
         return (diff[:, :, None] * X[:, None, :]).reshape(X.shape[0], -1)
 
-    def average_hessian(self, theta, X):
+    def average_hessian(self, theta, X, y=None):
         W = self._W(theta)
         P = self._softmax(X @ W.T)
         n = max(X.shape[0], 1)
@@ -344,7 +354,7 @@ class PoissonGLM(BaseGLM):
         eta = float(np.clip(theta @ x, -_POISSON_ETA_CLAMP, _POISSON_ETA_CLAMP))
         return (math.exp(eta) - float(y)) * x
 
-    def hessian_theta(self, theta, x):
+    def hessian_theta(self, theta, x, y=None):
         eta = float(np.clip(theta @ x, -_POISSON_ETA_CLAMP, _POISSON_ETA_CLAMP))
         return math.exp(eta) * _outer(x)
 
@@ -356,7 +366,7 @@ class PoissonGLM(BaseGLM):
         eta = self._eta(theta, X)
         return (np.exp(eta) - y)[:, None] * X
 
-    def average_hessian(self, theta, X):
+    def average_hessian(self, theta, X, y=None):
         eta = self._eta(theta, X)
         w = np.exp(eta)
         return (X.T * w) @ X / max(X.shape[0], 1)
@@ -368,9 +378,156 @@ class PoissonGLM(BaseGLM):
         return self.predict(theta, X)
 
 
+# ---------------------------------------------------------------------------
+# Exponential regression (canonical form)
+#
+# y ~ Exponential(λ_*(x)),  λ_θ(x) = exp(η),  η = θ^T x
+# ℓ(θ; x, y) = -η + y exp(η)
+# ∇_θ ℓ = (y exp(η) - 1) x;  ∇_θ^2 ℓ = y exp(η) x x^T  (y-dependent)
+# Both clamps applied: η ∈ [-5,5] and exp(η) ≤ 100.
+# Pseudo-target for acquisition is the predicted mean E[Y|x] = 1/λ = exp(-η);
+# AL loop adds multiplicative jitter so the clean gradient does not vanish.
+# ---------------------------------------------------------------------------
+class ExponentialGLM(BaseGLM):
+    name = "exponential"
+    is_classification = False
+    x_scale = 0.5
+
+    def _eta(self, theta, X):
+        return np.clip(X @ theta, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP)
+
+    @staticmethod
+    def _exp_capped(eta):
+        return np.minimum(np.exp(eta), _EXPGAMMA_EXP_CLAMP)
+
+    def sample_Y(self, X, w_star, rng):
+        eta = np.clip(X @ w_star, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP)
+        lam = np.exp(eta)
+        return rng.exponential(scale=1.0 / lam).astype(np.float64)
+
+    def loss(self, theta, X, y):
+        eta = self._eta(theta, X)
+        return float(np.mean(-eta + self._exp_capped(eta) * y))
+
+    def gradient_theta(self, theta, x, y):
+        eta = float(np.clip(theta @ x, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP))
+        e = min(math.exp(eta), _EXPGAMMA_EXP_CLAMP)
+        return (float(y) * e - 1.0) * x
+
+    def hessian_theta(self, theta, x, y=None):
+        eta = float(np.clip(theta @ x, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP))
+        e = min(math.exp(eta), _EXPGAMMA_EXP_CLAMP)
+        if y is None:
+            # Fisher information (plug-in y = E[Y|x] = 1/λ = exp(-η))
+            y_eff = math.exp(-eta)
+        else:
+            y_eff = float(y)
+        return min(y_eff * e, _EXPGAMMA_EXP_CLAMP) * _outer(x)
+
+    def gradient_x(self, theta, x, y):
+        eta = float(np.clip(theta @ x, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP))
+        e = min(math.exp(eta), _EXPGAMMA_EXP_CLAMP)
+        return (float(y) * e - 1.0) * theta
+
+    def batch_gradient(self, theta, X, y):
+        eta = self._eta(theta, X)
+        e = self._exp_capped(eta)
+        return (y * e - 1.0)[:, None] * X
+
+    def average_hessian(self, theta, X, y=None):
+        eta = self._eta(theta, X)
+        e = self._exp_capped(eta)
+        if y is None:
+            y_eff = np.exp(-eta)
+        else:
+            y_eff = y
+        w = np.minimum(y_eff * e, _EXPGAMMA_EXP_CLAMP)
+        return (X.T * w) @ X / max(X.shape[0], 1)
+
+    def predict(self, theta, X):
+        return np.exp(-self._eta(theta, X))  # E[Y|x] = 1/λ
+
+    def pseudo_label(self, theta, X):
+        return self.predict(theta, X)
+
+
+# ---------------------------------------------------------------------------
+# Gamma regression with log-link
+#
+# y ~ Gamma(shape=k, mean=μ_θ(x)),  μ = exp(η)
+# ℓ(θ; x, y) = k (y/μ + log μ) = k (y exp(-η) + η)
+# ∇_θ ℓ = k (1 - y/μ) x;  ∇_θ^2 ℓ = k (y/μ) x x^T  (y-dependent)
+# ---------------------------------------------------------------------------
+class GammaGLM(BaseGLM):
+    name = "gamma"
+    is_classification = False
+    x_scale = 0.5
+    k: float = 2.0
+
+    def _eta(self, theta, X):
+        return np.clip(X @ theta, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP)
+
+    def _mu(self, eta):
+        return np.minimum(np.exp(eta), _EXPGAMMA_EXP_CLAMP)
+
+    def sample_Y(self, X, w_star, rng):
+        eta = np.clip(X @ w_star, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP)
+        mu = np.exp(eta)
+        # Gamma with shape k and mean μ → scale = μ/k
+        return rng.gamma(shape=self.k, scale=mu / self.k).astype(np.float64)
+
+    def loss(self, theta, X, y):
+        eta = self._eta(theta, X)
+        mu = self._mu(eta)
+        return float(self.k * np.mean(y / np.maximum(mu, 1e-12) + eta))
+
+    def gradient_theta(self, theta, x, y):
+        eta = float(np.clip(theta @ x, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP))
+        mu = min(math.exp(eta), _EXPGAMMA_EXP_CLAMP)
+        return self.k * (1.0 - float(y) / max(mu, 1e-12)) * x
+
+    def hessian_theta(self, theta, x, y=None):
+        eta = float(np.clip(theta @ x, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP))
+        mu = min(math.exp(eta), _EXPGAMMA_EXP_CLAMP)
+        if y is None:
+            # Fisher information: E[k Y/μ] = k μ/μ = k
+            w = self.k
+        else:
+            w = self.k * float(y) / max(mu, 1e-12)
+        return min(w, _EXPGAMMA_EXP_CLAMP) * _outer(x)
+
+    def gradient_x(self, theta, x, y):
+        eta = float(np.clip(theta @ x, -_EXPGAMMA_ETA_CLAMP, _EXPGAMMA_ETA_CLAMP))
+        mu = min(math.exp(eta), _EXPGAMMA_EXP_CLAMP)
+        return self.k * (1.0 - float(y) / max(mu, 1e-12)) * theta
+
+    def batch_gradient(self, theta, X, y):
+        eta = self._eta(theta, X)
+        mu = self._mu(eta)
+        return (self.k * (1.0 - y / np.maximum(mu, 1e-12)))[:, None] * X
+
+    def average_hessian(self, theta, X, y=None):
+        eta = self._eta(theta, X)
+        mu = self._mu(eta)
+        if y is None:
+            w = np.full(X.shape[0], self.k)
+        else:
+            w = self.k * y / np.maximum(mu, 1e-12)
+        w = np.minimum(w, _EXPGAMMA_EXP_CLAMP)
+        return (X.T * w) @ X / max(X.shape[0], 1)
+
+    def predict(self, theta, X):
+        return self._mu(self._eta(theta, X))
+
+    def pseudo_label(self, theta, X):
+        return self.predict(theta, X)
+
+
 GLM_REGISTRY = {
     "gaussian": GaussianGLM,
     "logistic": LogisticGLM,
     "softmax": SoftmaxGLM,
     "poisson": PoissonGLM,
+    "exponential": ExponentialGLM,
+    "gamma": GammaGLM,
 }

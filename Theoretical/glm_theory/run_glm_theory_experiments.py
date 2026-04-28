@@ -49,7 +49,7 @@ from glm_theory.plotting import (
 
 
 METRIC_COLUMNS = [
-    "experiment", "glm_family", "seed", "round", "method", "batch_size",
+    "experiment", "glm_family", "seed", "round", "rounds_tag", "method", "batch_size",
     "alpha", "eps_acq", "logdet_secant", "lambda_min_secant_gram",
     "lambda_min_clean_gram", "lambda_min_hessian", "min_positive_hessian_eig",
     "condition_hessian", "train_loss_before", "train_loss_after",
@@ -61,7 +61,8 @@ def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="GLM theory verification (Experiments G/H/I).")
     p.add_argument("--glm", nargs="+",
                    default=["gaussian", "logistic", "softmax", "poisson"],
-                   choices=["gaussian", "logistic", "softmax", "poisson"])
+                   choices=["gaussian", "logistic", "softmax", "poisson",
+                            "exponential", "gamma"])
     p.add_argument("--methods", nargs="+",
                    default=["random", "badge", "secant_badge"],
                    choices=["random", "badge", "secant_badge", "oracle_logdet"])
@@ -87,6 +88,8 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--decay-curves-seed", type=int, default=0)
     p.add_argument("--outdir", default="results/glm_theory")
     p.add_argument("--log-level", default="INFO")
+    p.add_argument("--skip-figures", action="store_true",
+                   help="Skip figure / summary-table generation (used by staging tasks).")
     return p.parse_args()
 
 
@@ -167,6 +170,10 @@ def main() -> None:
         pickle.dump(all_decay, f)
 
     _verify_finite(df)
+
+    if args.skip_figures:
+        log.info("--skip-figures set; metrics.csv saved, exiting before plots/summaries")
+        return
 
     # summary tables
     experiment_G_summary(df).to_csv(

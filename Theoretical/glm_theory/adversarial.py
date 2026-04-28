@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from glm_theory.glms import BaseGLM, GaussianGLM, PoissonGLM
+from glm_theory.glms import (
+    BaseGLM,
+    ExponentialGLM,
+    GammaGLM,
+    GaussianGLM,
+    PoissonGLM,
+)
+
+_REGRESSION_FAMILIES = (GaussianGLM, PoissonGLM, ExponentialGLM, GammaGLM)
 
 
 def fgsm_perturb(
@@ -20,11 +28,11 @@ def fgsm_perturb(
     vanishes), fall back to the natural-parameter direction sign(θ).
     """
     X_adv = np.empty_like(X)
-    is_regression = isinstance(glm, (GaussianGLM, PoissonGLM))
+    is_regression = isinstance(glm, _REGRESSION_FAMILIES)
     for i, (x, y_i) in enumerate(zip(X, y_pseudo)):
         gx = glm.gradient_x(theta, x, y_i)
         if is_regression and not np.any(np.abs(gx) > 1e-12):
-            gx = theta if isinstance(glm, GaussianGLM) else theta
+            gx = theta
         sign = np.sign(gx)
         sign[sign == 0] = 1.0
         X_adv[i] = x + eps * sign

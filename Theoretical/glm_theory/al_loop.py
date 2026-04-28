@@ -21,7 +21,16 @@ from glm_theory.acquisition import (
 )
 from glm_theory.adversarial import fgsm_perturb
 from glm_theory.contraction import contraction_probe
-from glm_theory.glms import BaseGLM, GLM_REGISTRY, GaussianGLM, PoissonGLM
+from glm_theory.glms import (
+    BaseGLM,
+    ExponentialGLM,
+    GLM_REGISTRY,
+    GammaGLM,
+    GaussianGLM,
+    PoissonGLM,
+)
+
+_POSITIVE_REGRESSION = (PoissonGLM, ExponentialGLM, GammaGLM)
 from glm_theory.theory_metrics import (
     clean_gram,
     condition_number,
@@ -70,12 +79,17 @@ def _pseudo_targets(glm: BaseGLM, theta: np.ndarray, X: np.ndarray,
     """Pseudo-labels for acquisition.
 
     Classification uses argmax / threshold predictions. Regression GLMs add a small frozen
-    jitter so that the clean loss-gradient does not vanish identically when the pseudo-target
-    equals the model's own prediction (see paper's note in §Adversarial perturbation).
+    jitter so that the clean loss-gradient does not vanish identically. Positive-support
+    families (Poisson / Exponential / Gamma) use multiplicative jitter and clamp to a small
+    positive floor so the perturbed pseudo-target stays in the GLM's domain.
     """
     y = glm.pseudo_label(theta, X)
-    if isinstance(glm, (GaussianGLM, PoissonGLM)) and jitter > 0.0:
-        y = y + rng.normal(scale=jitter, size=y.shape)
+    if jitter > 0.0:
+        if isinstance(glm, GaussianGLM):
+            y = y + rng.normal(scale=jitter, size=y.shape)
+        elif isinstance(glm, _POSITIVE_REGRESSION):
+            y = y * (1.0 + rng.normal(scale=jitter, size=y.shape))
+            y = np.maximum(y, 1e-6)
     return y
 
 
@@ -158,7 +172,11 @@ def run_one_seed(cfg: ALConfig, seed: int) -> List[Dict]:
             S_idx = np.array(state["S"], dtype=np.int64)
             X_union = np.concatenate([X_all[S_idx], X_all[B]], axis=0)
             Y_union = np.concatenate([Y_all[S_idx], Y_all[B]], axis=0)
-            H_avg = glm.average_hessian(theta, X_union)
+            H_avg = glm.average_hessian(theta, X_union, Y_union)
+            if not np.all(np.isfinite(H_avg)):
+                log.warning("non-finite Hessian for %s round %d (%s); zero-filling",
+                            m, t, glm.name)
+                H_avg = np.nan_to_num(H_avg, nan=0.0, posinf=0.0, neginf=0.0)
 
             ld_secant = logdet(G_phi, cfg.ridge)
             lmin_phi = lambda_min(G_phi, cfg.ridge)
@@ -181,6 +199,7 @@ def run_one_seed(cfg: ALConfig, seed: int) -> List[Dict]:
                 "glm_family": glm.name,
                 "seed": seed,
                 "round": t,
+                "rounds_tag": cfg.n_rounds,
                 "method": m,
                 "batch_size": cfg.q,
                 "alpha": cfg.alpha,

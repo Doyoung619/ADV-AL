@@ -28,6 +28,8 @@ GLM_LABELS = {
     "logistic": "Logistic",
     "softmax": "Softmax",
     "poisson": "Poisson",
+    "exponential": "Exponential",
+    "gamma": "Gamma",
 }
 
 
@@ -46,7 +48,8 @@ def _save(fig: plt.Figure, outpath: str) -> str:
     return outpath
 
 
-def plot_experiment_G(df: pd.DataFrame, glm_family: str, outdir: str) -> List[str]:
+def plot_experiment_G(df: pd.DataFrame, glm_family: str, outdir: str,
+                      name_suffix: str = "") -> List[str]:
     """λ_min(G_B^φ) and λ_min(H_{S_t∪B}) over rounds (mean ± std over seeds)."""
     sub = df[df["glm_family"] == glm_family]
     if sub.empty:
@@ -80,7 +83,7 @@ def plot_experiment_G(df: pd.DataFrame, glm_family: str, outdir: str) -> List[st
     axes[0].legend(loc="best", frameon=True, framealpha=0.85)
     fig.suptitle(f"Experiment G — Spectral growth ({GLM_LABELS.get(glm_family, glm_family)})", y=1.02)
 
-    outpath = os.path.join(outdir, f"experiment_G_spectral_growth_{glm_family}.pdf")
+    outpath = os.path.join(outdir, f"experiment_G_spectral_growth_{glm_family}{name_suffix}.pdf")
     return [_save(fig, outpath)]
 
 
@@ -138,6 +141,105 @@ def plot_experiment_H(df: pd.DataFrame, glm_family: str, outdir: str) -> List[st
     )
     ax.legend(loc="best", frameon=True, framealpha=0.85)
     outpath = os.path.join(outdir, f"experiment_H_logdet_vs_lambdamin_{glm_family}.pdf")
+    return [_save(fig, outpath)]
+
+
+def plot_experiment_G_compare_rounds(df_short: pd.DataFrame, df_long: pd.DataFrame,
+                                     glm_family: str, outdir: str,
+                                     short_label: str = "R=20",
+                                     long_label: str = "R=100") -> List[str]:
+    """Overlay short- and long-horizon spectral-growth curves for one GLM.
+
+    Plots λ_min(G_B^φ) and λ_min(H_{S_t∪B}) over rounds for each method, with the long
+    horizon drawn on a wider x-axis. Used to inspect whether spectral growth persists
+    or saturates.
+    """
+    sub_s = df_short[df_short["glm_family"] == glm_family]
+    sub_l = df_long[df_long["glm_family"] == glm_family]
+    if sub_s.empty or sub_l.empty:
+        return []
+    h_col = _hessian_eig_col(glm_family)
+    metric_specs = [
+        ("lambda_min_secant_gram", r"$\lambda_{\min}(G_B^{\phi})$"),
+        (h_col, r"$\lambda_{\min}(H_{S_t \cup B})$"),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 4.8))
+    for ax, (col, ylabel) in zip(axes, metric_specs):
+        for label_horizon, sub_h, linestyle, alpha_fill in (
+            (short_label, sub_s, "--", 0.10),
+            (long_label, sub_l, "-", 0.18),
+        ):
+            for method in sub_h["method"].unique():
+                ms = sub_h[sub_h["method"] == method]
+                grp = ms.groupby("round")[col].agg(["mean", "std"]).reset_index()
+                ax.plot(
+                    grp["round"], grp["mean"],
+                    color=METHOD_COLORS.get(method, "k"),
+                    linestyle=linestyle,
+                    label=f"{METHOD_LABELS.get(method, method)} ({label_horizon})",
+                    linewidth=1.6,
+                )
+                ax.fill_between(
+                    grp["round"], grp["mean"] - grp["std"], grp["mean"] + grp["std"],
+                    color=METHOD_COLORS.get(method, "k"), alpha=alpha_fill,
+                )
+        ax.set_xlabel("Active learning round")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.set_yscale("symlog", linthresh=1e-6)
+    axes[0].legend(loc="best", fontsize=9, frameon=True, framealpha=0.85, ncol=2)
+    fig.suptitle(
+        f"Experiment G — Spectral growth, {short_label} vs {long_label} "
+        f"({GLM_LABELS.get(glm_family, glm_family)})",
+        y=1.02,
+    )
+    outpath = os.path.join(
+        outdir,
+        f"experiment_G_spectral_growth_{glm_family}_compare_R20_vs_R100.pdf",
+    )
+    return [_save(fig, outpath)]
+
+
+def plot_experiment_I_combined(df: pd.DataFrame, outdir: str,
+                               name_suffix: str = "") -> List[str]:
+    """Combined scatter of λ_min(H) vs contraction slope across all GLM families.
+
+    Each family contributes its own panel; for softmax the smallest *positive* eigenvalue
+    is used since the Hessian is rank-deficient by construction.
+    """
+    families = [g for g in
+                ["gaussian", "logistic", "softmax", "poisson", "exponential", "gamma"]
+                if g in df["glm_family"].unique()]
+    if not families:
+        return []
+    n = len(families)
+    cols = 3 if n >= 3 else n
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4.6 * cols, 4.6 * rows), squeeze=False)
+    flat = [ax for row in axes for ax in row]
+    for ax, fam in zip(flat, families):
+        sub = df[df["glm_family"] == fam]
+        h_col = _hessian_eig_col(fam)
+        methods_arr = sub["method"].to_numpy()
+        method_set = list(dict.fromkeys(methods_arr.tolist()))
+        p, s = _scatter_with_corr(
+            ax, sub[h_col].to_numpy(), sub["empirical_contraction_slope"].to_numpy(),
+            methods_arr, method_set,
+        )
+        ax.set_xscale("symlog", linthresh=1e-6)
+        ax.set_xlabel(rf"$\lambda_{{\min}}(H)$ [{h_col}]")
+        ax.set_ylabel("contraction slope $c$")
+        ax.set_title(f"{GLM_LABELS.get(fam, fam)}\nPearson={p:.2f} / Spearman={s:.2f}",
+                     fontsize=10)
+    for ax in flat[len(families):]:
+        ax.set_axis_off()
+    flat[0].legend(loc="best", fontsize=9, frameon=True, framealpha=0.85)
+    fig.suptitle(r"Experiment I — $\lambda_{\min}(H)$ vs empirical contraction (all GLMs)",
+                 y=1.005, fontsize=14)
+    outpath = os.path.join(
+        outdir,
+        f"experiment_I_lambdamin_vs_contraction_all_glms{name_suffix}.pdf",
+    )
     return [_save(fig, outpath)]
 
 
